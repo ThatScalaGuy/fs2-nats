@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.client
@@ -13,7 +19,7 @@ package fs2.nats.client
 import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
 import cats.effect.std.{Queue, Supervisor}
 import cats.syntax.all.*
-import com.comcast.ip4s.{Host, SocketAddress}
+import com.comcast.ip4s.{SocketAddress}
 import fs2.{Chunk, Stream}
 import fs2.io.net.Network
 import fs2.io.net.tls.TLSContext
@@ -23,96 +29,95 @@ import fs2.nats.publish.SerializationUtils
 import fs2.nats.transport.{NatsSocket, TlsTransport, Transport, TransportConfig}
 import io.circe.syntax.*
 import java.time.Instant
-import scala.concurrent.duration.*
 
-/**
- * State of the NATS connection.
- *
- * @param serverInfo The latest server INFO
- * @param connectedAt When the connection was established
- * @param reconnectAttempt Current reconnection attempt (0 if connected)
- */
+/** State of the NATS connection.
+  *
+  * @param serverInfo
+  *   The latest server INFO
+  * @param connectedAt
+  *   When the connection was established
+  * @param reconnectAttempt
+  *   Current reconnection attempt (0 if connected)
+  */
 final case class ConnectionState(
     serverInfo: Info,
     connectedAt: Instant,
     reconnectAttempt: Int
 )
 
-/**
- * Manages the NATS connection lifecycle including reconnection.
- *
- * Responsibilities:
- * - Establish initial connection (wait for INFO, send CONNECT)
- * - Handle reconnection with exponential backoff and jitter
- * - Reapply active subscriptions after reconnect
- * - Update connection state atomically
- * - Emit connection events
- *
- * @tparam F The effect type
- */
+/** Manages the NATS connection lifecycle including reconnection.
+  *
+  * Responsibilities:
+  *   - Establish initial connection (wait for INFO, send CONNECT)
+  *   - Handle reconnection with exponential backoff and jitter
+  *   - Reapply active subscriptions after reconnect
+  *   - Update connection state atomically
+  *   - Emit connection events
+  *
+  * @tparam F
+  *   The effect type
+  */
 trait ConnectionManager[F[_]]:
 
-  /**
-   * Get the current transport.
-   */
+  /** Get the current transport.
+    */
   def transport: F[Transport[F]]
 
-  /**
-   * Get the current connection state.
-   */
+  /** Get the current connection state.
+    */
   def state: F[ConnectionState]
 
-  /**
-   * Send bytes through the current transport.
-   */
+  /** Send bytes through the current transport.
+    */
   def send(bytes: Chunk[Byte]): F[Unit]
 
-  /**
-   * Stream of incoming NATS frames from the server.
-   */
+  /** Stream of incoming NATS frames from the server.
+    */
   def frames: Stream[F, NatsFrame]
 
-  /**
-   * Stream of connection events.
-   */
+  /** Stream of connection events.
+    */
   def events: Stream[F, ClientEvent]
 
-  /**
-   * Trigger a reconnection attempt.
-   *
-   * @param reason The reason for reconnection
-   */
+  /** Trigger a reconnection attempt.
+    *
+    * @param reason
+    *   The reason for reconnection
+    */
   def reconnect(reason: String): F[Unit]
 
-  /**
-   * Close the connection manager and all resources.
-   */
+  /** Close the connection manager and all resources.
+    */
   def close: F[Unit]
 
-  /**
-   * Register a callback for resubscription after reconnect.
-   *
-   * @param resubscribe Function to call after reconnection
-   */
+  /** Register a callback for resubscription after reconnect.
+    *
+    * @param resubscribe
+    *   Function to call after reconnection
+    */
   def onReconnect(resubscribe: Info => F[Unit]): F[Unit]
 
-  /**
-   * Update the max_payload from a new INFO message.
-   */
+  /** Update the max_payload from a new INFO message.
+    */
   def updateServerInfo(info: Info): F[Unit]
 
 object ConnectionManager:
 
-  /**
-   * Create a connection manager and establish the initial connection.
-   *
-   * @param config Client configuration
-   * @param transportConfig Transport configuration
-   * @param parserConfig Parser configuration
-   * @param tlsContext Optional TLS context for secure connections
-   * @tparam F The effect type
-   * @return Resource managing the ConnectionManager lifecycle
-   */
+  /** Create a connection manager and establish the initial connection.
+    *
+    * @param config
+    *   Client configuration
+    * @param transportConfig
+    *   Transport configuration
+    * @param parserConfig
+    *   Parser configuration
+    * @param tlsContext
+    *   Optional TLS context for secure connections
+    * @tparam F
+    *   The effect type
+    * @return
+    *   Resource managing the ConnectionManager lifecycle
+    */
   def connect[F[_]: Async: Network](
       config: ClientConfig,
       transportConfig: TransportConfig = TransportConfig.default,
@@ -159,7 +164,7 @@ object ConnectionManager:
     private val backoffPolicy = Backoff.fromConfig(config.backoff)
 
     def initialize: F[Unit] =
-      establishConnection(1).flatMap { case (transport, info) =>
+      establishConnection().flatMap { case (transport, info) =>
         val now = Instant.now()
         val connState = ConnectionState(info, now, 0)
         stateRef.set(Some(connState)) *>
@@ -170,13 +175,13 @@ object ConnectionManager:
     override def transport: F[Transport[F]] =
       transportRef.get.flatMap {
         case Some(t) => Async[F].pure(t)
-        case None => Async[F].raiseError(NatsError.ClientClosed)
+        case None    => Async[F].raiseError(NatsError.ClientClosed)
       }
 
     override def state: F[ConnectionState] =
       stateRef.get.flatMap {
         case Some(s) => Async[F].pure(s)
-        case None => Async[F].raiseError(NatsError.ClientClosed)
+        case None    => Async[F].raiseError(NatsError.ClientClosed)
       }
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
@@ -192,7 +197,9 @@ object ConnectionManager:
       closedRef.get.flatMap { closed =>
         if closed then Async[F].unit
         else
-          eventQueue.offer(ClientEvent.Disconnected(reason, willReconnect = true)) *>
+          eventQueue.offer(
+            ClientEvent.Disconnected(reason, willReconnect = true)
+          ) *>
             reconnectLoop(1)
       }
 
@@ -200,7 +207,7 @@ object ConnectionManager:
       closedRef.set(true) *>
         transportRef.get.flatMap {
           case Some(t) => t.close
-          case None => Async[F].unit
+          case None    => Async[F].unit
         } *>
         transportRef.set(None) *>
         stateRef.set(None)
@@ -211,7 +218,7 @@ object ConnectionManager:
     override def updateServerInfo(info: Info): F[Unit] =
       stateRef.update {
         case Some(s) => Some(s.copy(serverInfo = info))
-        case None => None
+        case None    => None
       } *> eventQueue.offer(ClientEvent.ServerInfoUpdated(info))
 
     private def reconnectLoop(attempt: Int): F[Unit] =
@@ -226,18 +233,20 @@ object ConnectionManager:
               ) *> Async[F].raiseError(error)
 
             case Some(delay) =>
-              eventQueue.offer(ClientEvent.Reconnecting(attempt, delay.toMillis)) *>
+              eventQueue.offer(
+                ClientEvent.Reconnecting(attempt, delay.toMillis)
+              ) *>
                 Async[F].sleep(delay) *>
-                establishConnection(attempt).attempt.flatMap {
+                establishConnection().attempt.flatMap {
                   case Right((newTransport, info)) =>
                     val now = Instant.now()
                     val connState = ConnectionState(info, now, 0)
-                    
+
                     transportRef.set(Some(newTransport)) *>
                       stateRef.set(Some(connState)) *>
                       resubscribeRef.get.flatMap {
                         case Some(resub) => resub(info)
-                        case None => Async[F].unit
+                        case None        => Async[F].unit
                       } *>
                       eventQueue.offer(ClientEvent.Reconnected(info, attempt))
 
@@ -246,7 +255,7 @@ object ConnectionManager:
                 }
       }
 
-    private def establishConnection(attempt: Int): F[(Transport[F], Info)] =
+    private def establishConnection(): F[(Transport[F], Info)] =
       val address = SocketAddress(config.host, config.port)
 
       val transportResource: Resource[F, Transport[F]] =
@@ -255,8 +264,16 @@ object ConnectionManager:
             case Some(ctx) =>
               for
                 socket <- Network[F].client(address)
-                params = config.tlsParams.getOrElse(fs2.io.net.tls.TLSParameters.Default)
-                transport <- TlsTransport.wrap(ctx, socket, params, transportConfig, parserConfig)
+                params = config.tlsParams.getOrElse(
+                  fs2.io.net.tls.TLSParameters.Default
+                )
+                transport <- TlsTransport.wrap(
+                  ctx,
+                  socket,
+                  params,
+                  transportConfig,
+                  parserConfig
+                )
               yield transport
             case None =>
               Resource.eval(
@@ -264,8 +281,7 @@ object ConnectionManager:
                   NatsError.TlsError("TLS requested but no TLSContext provided")
                 )
               )
-        else
-          NatsSocket.resource(address, transportConfig, parserConfig)
+        else NatsSocket.resource(address, transportConfig, parserConfig)
 
       transportResource.allocated.flatMap { case (transport, release) =>
         waitForInfoAndConnect(transport, release)
@@ -283,36 +299,44 @@ object ConnectionManager:
         .last
         .flatMap {
           case Some(info) => infoDeferred.complete(Right(info))
-          case None =>
+          case None       =>
             infoDeferred.complete(
               Left(NatsError.ConnectionFailed("No INFO received from server"))
             )
         }
-        .handleErrorWith(err =>
-          infoDeferred.complete(Left(err)).as(true)
-        )
+        .handleErrorWith(err => infoDeferred.complete(Left(err)).as(true))
 
       val timeout = Temporal[F].sleep(transportConfig.connectTimeout) *>
         infoDeferred.complete(
-          Left(NatsError.Timeout("Waiting for server INFO", transportConfig.connectTimeout.toMillis))
+          Left(
+            NatsError.Timeout(
+              "Waiting for server INFO",
+              transportConfig.connectTimeout.toMillis
+            )
+          )
         )
 
-      Async[F].race(
-        Async[F].start(infoReader) *> infoDeferred.get,
-        timeout
-      ).flatMap {
-        case Left(Left(err)) =>
-          releaseTransport *> Async[F].raiseError(err)
+      Async[F]
+        .race(
+          supervisor.supervise(infoReader) *> infoDeferred.get,
+          timeout
+        )
+        .flatMap {
+          case Left(Left(err)) =>
+            releaseTransport *> Async[F].raiseError(err)
 
-        case Left(Right(info)) =>
-          sendConnect(transport, info).as((transport, info))
+          case Left(Right(info)) =>
+            sendConnect(transport, info).as((transport, info))
 
-        case Right(_) =>
-          releaseTransport *>
-            Async[F].raiseError(
-              NatsError.Timeout("Waiting for server INFO", transportConfig.connectTimeout.toMillis)
-            )
-      }
+          case Right(_) =>
+            releaseTransport *>
+              Async[F].raiseError(
+                NatsError.Timeout(
+                  "Waiting for server INFO",
+                  transportConfig.connectTimeout.toMillis
+                )
+              )
+        }
 
     private def sendConnect(transport: Transport[F], info: Info): F[Unit] =
       val connectMsg = buildConnectMessage(info)

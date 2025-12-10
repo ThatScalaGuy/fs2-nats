@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.client
@@ -19,31 +25,35 @@ import fs2.io.net.tls.TLSContext
 import fs2.nats.errors.NatsError
 import fs2.nats.protocol.{Headers, Info, NatsFrame, ParserConfig}
 import fs2.nats.publish.{Publisher, SerializationUtils}
-import fs2.nats.subscriptions.{NatsMessage, SidAllocator, SubscriptionHandle, SubscriptionManager}
+import fs2.nats.subscriptions.{NatsMessage, SidAllocator, SubscriptionManager}
 import fs2.nats.transport.TransportConfig
 
-/**
- * NATS client for publishing and subscribing to messages.
- *
- * Provides a high-level API for interacting with a NATS server including:
- * - Publishing messages (with and without headers)
- * - Subscribing to subjects (with queue groups)
- * - Connection event notifications
- * - Automatic reconnection with subscription recovery
- *
- * @tparam F The effect type
- */
+/** NATS client for publishing and subscribing to messages.
+  *
+  * Provides a high-level API for interacting with a NATS server including:
+  *   - Publishing messages (with and without headers)
+  *   - Subscribing to subjects (with queue groups)
+  *   - Connection event notifications
+  *   - Automatic reconnection with subscription recovery
+  *
+  * @tparam F
+  *   The effect type
+  */
 trait NatsClient[F[_]]:
 
-  /**
-   * Publish a message to a subject.
-   *
-   * @param subject The subject to publish to
-   * @param payload The message payload
-   * @param headers Optional message headers (default empty)
-   * @param replyTo Optional reply-to subject for request/reply pattern
-   * @return Effect that completes when message is enqueued for sending
-   */
+  /** Publish a message to a subject.
+    *
+    * @param subject
+    *   The subject to publish to
+    * @param payload
+    *   The message payload
+    * @param headers
+    *   Optional message headers (default empty)
+    * @param replyTo
+    *   Optional reply-to subject for request/reply pattern
+    * @return
+    *   Effect that completes when message is enqueued for sending
+    */
   def publish(
       subject: String,
       payload: Chunk[Byte],
@@ -51,66 +61,74 @@ trait NatsClient[F[_]]:
       replyTo: Option[String] = None
   ): F[Unit]
 
-  /**
-   * Subscribe to a subject.
-   *
-   * @param subject The subject to subscribe to (may contain wildcards)
-   * @param queueGroup Optional queue group for load-balanced delivery
-   * @return Resource providing a stream of messages and automatic unsubscribe on release
-   */
+  /** Subscribe to a subject.
+    *
+    * @param subject
+    *   The subject to subscribe to (may contain wildcards)
+    * @param queueGroup
+    *   Optional queue group for load-balanced delivery
+    * @return
+    *   Resource providing a stream of messages and automatic unsubscribe on
+    *   release
+    */
   def subscribe(
       subject: String,
       queueGroup: Option[String] = None
   ): Resource[F, Stream[F, NatsMessage]]
 
-  /**
-   * Stream of client events (connections, disconnections, errors).
-   *
-   * @return A stream of ClientEvent values
-   */
+  /** Stream of client events (connections, disconnections, errors).
+    *
+    * @return
+    *   A stream of ClientEvent values
+    */
   def events: Stream[F, ClientEvent]
 
-  /**
-   * Close the client and release all resources.
-   * All subscriptions will be closed and no further operations allowed.
-   *
-   * @return Effect that completes when the client is fully closed
-   */
+  /** Close the client and release all resources. All subscriptions will be
+    * closed and no further operations allowed.
+    *
+    * @return
+    *   Effect that completes when the client is fully closed
+    */
   def close: F[Unit]
 
-  /**
-   * Get the current server INFO.
-   *
-   * @return The latest server INFO received
-   */
+  /** Get the current server INFO.
+    *
+    * @return
+    *   The latest server INFO received
+    */
   def serverInfo: F[Info]
 
-  /**
-   * Check if the client is connected.
-   *
-   * @return True if currently connected to the server
-   */
+  /** Check if the client is connected.
+    *
+    * @return
+    *   True if currently connected to the server
+    */
   def isConnected: F[Boolean]
 
 object NatsClient:
 
-  /**
-   * Connect to a NATS server and create a client.
-   *
-   * The resource will:
-   * - Establish a TCP/TLS connection
-   * - Wait for server INFO and send CONNECT
-   * - Set up subscription management
-   * - Handle PING/PONG keepalive
-   * - Manage reconnection on failure
-   *
-   * @param config Client configuration
-   * @param transportConfig Optional transport configuration
-   * @param parserConfig Optional parser configuration
-   * @param tlsContext Optional TLS context for secure connections
-   * @tparam F The effect type with Async and Network capabilities
-   * @return Resource managing the NatsClient lifecycle
-   */
+  /** Connect to a NATS server and create a client.
+    *
+    * The resource will:
+    *   - Establish a TCP/TLS connection
+    *   - Wait for server INFO and send CONNECT
+    *   - Set up subscription management
+    *   - Handle PING/PONG keepalive
+    *   - Manage reconnection on failure
+    *
+    * @param config
+    *   Client configuration
+    * @param transportConfig
+    *   Optional transport configuration
+    * @param parserConfig
+    *   Optional parser configuration
+    * @param tlsContext
+    *   Optional TLS context for secure connections
+    * @tparam F
+    *   The effect type with Async and Network capabilities
+    * @return
+    *   Resource managing the NatsClient lifecycle
+    */
   def connect[F[_]: Async: Network](
       config: ClientConfig,
       transportConfig: TransportConfig = TransportConfig.default,
@@ -150,7 +168,6 @@ object NatsClient:
       supervisor <- Supervisor[F]
 
       client = new NatsClientImpl[F](
-        config,
         connManager,
         subManager,
         sidAllocator,
@@ -163,7 +180,7 @@ object NatsClient:
       _ <- Resource.make(client.initialize)(_ => client.close)
     yield client
 
-  private def sendUnsub[F[_]: Async](connManager: ConnectionManager[F])(
+  private def sendUnsub[F[_]](connManager: ConnectionManager[F])(
       sid: Long,
       maxMsgs: Option[Int]
   ): F[Unit] =
@@ -175,10 +192,10 @@ object NatsClient:
     override def frames: Stream[F, NatsFrame] = connManager.frames
     override def send(bytes: Chunk[Byte]): F[Unit] = connManager.send(bytes)
     override def close: F[Unit] = connManager.close
-    override def isConnected: F[Boolean] = connManager.transport.flatMap(_.isConnected)
+    override def isConnected: F[Boolean] =
+      connManager.transport.flatMap(_.isConnected)
 
   private class NatsClientImpl[F[_]: Async](
-      config: ClientConfig,
       connManager: ConnectionManager[F],
       subManager: SubscriptionManager[F],
       sidAllocator: SidAllocator[F],
@@ -199,7 +216,9 @@ object NatsClient:
     private def resubscribeAll: F[Unit] =
       subManager.activeSubscriptions.flatMap { subs =>
         subs.traverse_ { case (sid, subject, queueGroup) =>
-          connManager.send(SerializationUtils.buildSub(subject, queueGroup, sid))
+          connManager.send(
+            SerializationUtils.buildSub(subject, queueGroup, sid)
+          )
         }
       }
 
@@ -230,7 +249,9 @@ object NatsClient:
           Async[F].unit
 
         case NatsFrame.ErrFrame(msg) =>
-          eventQueue.offer(ClientEvent.ProtocolError(msg, fatal = isAuthError(msg)))
+          eventQueue.offer(
+            ClientEvent.ProtocolError(msg, fatal = isAuthError(msg))
+          )
 
         case NatsFrame.InfoFrame(info) =>
           connManager.updateServerInfo(info) *>
@@ -238,10 +259,11 @@ object NatsClient:
             (if info.ldmMode then eventQueue.offer(ClientEvent.LameDuckMode)
              else Async[F].unit)
 
-        case msg @ (NatsFrame.MsgFrame(_, _, _, _) | NatsFrame.HMsgFrame(_, _, _, _, _, _)) =>
+        case msg @ (NatsFrame.MsgFrame(_, _, _, _) |
+            NatsFrame.HMsgFrame(_, _, _, _, _, _)) =>
           subManager.routeMessage(msg).flatMap {
             case Some(slowConsumer) => eventQueue.offer(slowConsumer)
-            case None => Async[F].unit
+            case None               => Async[F].unit
           }
 
         case NatsFrame.ParseErrorFrame(msg, _) =>
@@ -250,8 +272,8 @@ object NatsClient:
     private def isAuthError(msg: String): Boolean =
       val lower = msg.toLowerCase
       lower.contains("authorization") ||
-        lower.contains("authentication") ||
-        lower.contains("permission")
+      lower.contains("authentication") ||
+      lower.contains("permission")
 
     override def publish(
         subject: String,
@@ -260,26 +282,28 @@ object NatsClient:
         replyTo: Option[String]
     ): F[Unit] =
       checkClosed *>
-        (if headers.isEmpty then
-           publisher.publish(subject, payload, replyTo)
-         else
-           publisher.publishWithHeaders(subject, payload, headers, replyTo))
+        (if headers.isEmpty then publisher.publish(subject, payload, replyTo)
+         else publisher.publishWithHeaders(subject, payload, headers, replyTo))
 
     override def subscribe(
         subject: String,
         queueGroup: Option[String]
     ): Resource[F, Stream[F, NatsMessage]] =
-      Resource.make(
-        for
-          _ <- checkClosed
-          sid <- sidAllocator.next
-          result <- subManager.register(sid, subject, queueGroup)
-          (stream, handle) = result
-          _ <- connManager.send(SerializationUtils.buildSub(subject, queueGroup, sid))
-        yield (stream, handle)
-      ) { case (_, handle) =>
-        handle.unsubscribe
-      }.map(_._1)
+      Resource
+        .make(
+          for
+            _ <- checkClosed
+            sid <- sidAllocator.next
+            result <- subManager.register(sid, subject, queueGroup)
+            (stream, handle) = result
+            _ <- connManager.send(
+              SerializationUtils.buildSub(subject, queueGroup, sid)
+            )
+          yield (stream, handle)
+        ) { case (_, handle) =>
+          handle.unsubscribe
+        }
+        .map(_._1)
 
     override def events: Stream[F, ClientEvent] =
       Stream.fromQueueUnterminated(eventQueue).merge(connManager.events)

@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.transport
@@ -18,13 +24,21 @@ import fs2.nats.publish.SerializationUtils
 class SerializationUtilsSpec extends CatsEffectSuite:
 
   test("buildPub without reply-to") {
-    val result = SerializationUtils.buildPub("FOO.BAR", None, Chunk.array("Hello".getBytes))
+    val result = SerializationUtils.buildPub(
+      "FOO.BAR",
+      None,
+      Chunk.array("Hello".getBytes)
+    )
     val expected = "PUB FOO.BAR 5\r\nHello\r\n"
     assertEquals(new String(result.toArray), expected)
   }
 
   test("buildPub with reply-to") {
-    val result = SerializationUtils.buildPub("FOO", Some("INBOX.123"), Chunk.array("Hi".getBytes))
+    val result = SerializationUtils.buildPub(
+      "FOO",
+      Some("INBOX.123"),
+      Chunk.array("Hi".getBytes)
+    )
     val expected = "PUB FOO INBOX.123 2\r\nHi\r\n"
     assertEquals(new String(result.toArray), expected)
   }
@@ -50,7 +64,8 @@ class SerializationUtilsSpec extends CatsEffectSuite:
   test("buildHPub with reply-to") {
     val headers = Chunk.array("NATS/1.0\r\n\r\n".getBytes)
     val payload = Chunk.array("test".getBytes)
-    val result = SerializationUtils.buildHPub("FOO", Some("INBOX.X"), headers, payload)
+    val result =
+      SerializationUtils.buildHPub("FOO", Some("INBOX.X"), headers, payload)
 
     val expected = "HPUB FOO INBOX.X"
     assert(new String(result.toArray).startsWith(expected))
@@ -125,6 +140,12 @@ class SerializationUtilsSpec extends CatsEffectSuite:
 
   test("byteLength calculates UTF-8 length correctly") {
     assertEquals(SerializationUtils.byteLength("Hello"), 5)
-    assertEquals(SerializationUtils.byteLength("Héllo"), 6) // é is 2 bytes in UTF-8
-    assertEquals(SerializationUtils.byteLength("你好"), 6)  // Chinese chars are 3 bytes each
+    assertEquals(
+      SerializationUtils.byteLength("Héllo"),
+      6
+    ) // é is 2 bytes in UTF-8
+    assertEquals(
+      SerializationUtils.byteLength("你好"),
+      6
+    ) // Chinese chars are 3 bytes each
   }

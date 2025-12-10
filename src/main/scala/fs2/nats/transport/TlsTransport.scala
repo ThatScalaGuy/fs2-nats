@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.transport
@@ -18,25 +24,30 @@ import fs2.io.net.Socket
 import fs2.io.net.tls.{TLSContext, TLSParameters, TLSSocket}
 import fs2.nats.protocol.{NatsFrame, ParserConfig, ProtocolParser}
 
-/**
- * TLS-wrapped NATS transport.
- *
- * Provides the same Transport interface over a TLS-encrypted connection.
- * Used when connecting to NATS servers that require TLS.
- */
+/** TLS-wrapped NATS transport.
+  *
+  * Provides the same Transport interface over a TLS-encrypted connection. Used
+  * when connecting to NATS servers that require TLS.
+  */
 object TlsTransport:
 
-  /**
-   * Wrap an existing socket with TLS and return a Transport.
-   *
-   * @param tlsContext The TLS context for creating secure connections
-   * @param underlying The underlying TCP socket
-   * @param params TLS parameters (hostname verification, protocols, etc.)
-   * @param config Transport configuration
-   * @param parserConfig Parser configuration
-   * @tparam F The effect type
-   * @return A Resource that manages the TLS Transport lifecycle
-   */
+  /** Wrap an existing socket with TLS and return a Transport.
+    *
+    * @param tlsContext
+    *   The TLS context for creating secure connections
+    * @param underlying
+    *   The underlying TCP socket
+    * @param params
+    *   TLS parameters (hostname verification, protocols, etc.)
+    * @param config
+    *   Transport configuration
+    * @param parserConfig
+    *   Parser configuration
+    * @tparam F
+    *   The effect type
+    * @return
+    *   A Resource that manages the TLS Transport lifecycle
+    */
   def wrap[F[_]: Async](
       tlsContext: TLSContext[F],
       underlying: Socket[F],
@@ -45,38 +56,61 @@ object TlsTransport:
       parserConfig: ParserConfig = ParserConfig.default
   ): Resource[F, Transport[F]] =
     for
-      tlsSocket <- tlsContext.clientBuilder(underlying).withParameters(params).build
+      tlsSocket <- tlsContext
+        .clientBuilder(underlying)
+        .withParameters(params)
+        .build
       transport <- fromTlsSocket(tlsSocket, config, parserConfig)
     yield transport
 
-  /**
-   * Create a Transport from an existing TLS socket.
-   *
-   * @param socket The TLS socket
-   * @param config Transport configuration
-   * @param parserConfig Parser configuration
-   * @tparam F The effect type
-   * @return A Resource that manages the Transport lifecycle
-   */
+  /** Create a Transport from an existing TLS socket.
+    *
+    * @param socket
+    *   The TLS socket
+    * @param config
+    *   Transport configuration
+    * @param parserConfig
+    *   Parser configuration
+    * @tparam F
+    *   The effect type
+    * @return
+    *   A Resource that manages the Transport lifecycle
+    */
   def fromTlsSocket[F[_]: Async](
       socket: TLSSocket[F],
       config: TransportConfig = TransportConfig.default,
       parserConfig: ParserConfig = ParserConfig.default
   ): Resource[F, Transport[F]] =
     for
-      writeQueue <- Resource.eval(Queue.bounded[F, Option[Chunk[Byte]]](config.writeQueueCapacity))
+      writeQueue <- Resource.eval(
+        Queue.bounded[F, Option[Chunk[Byte]]](config.writeQueueCapacity)
+      )
       connectedRef <- Resource.eval(Ref.of[F, Boolean](true))
-      _ <- startWriter(socket, writeQueue, connectedRef)
-    yield new TlsSocketTransport[F](socket, writeQueue, connectedRef, config, parserConfig)
+      _ <- startWriter(socket, writeQueue, connectedRef, config)
+    yield new TlsSocketTransport[F](
+      socket,
+      writeQueue,
+      connectedRef,
+      parserConfig
+    )
 
   private def startWriter[F[_]: Async](
       socket: TLSSocket[F],
       writeQueue: Queue[F, Option[Chunk[Byte]]],
-      connectedRef: Ref[F, Boolean]
+      connectedRef: Ref[F, Boolean],
+      config: TransportConfig
   ): Resource[F, Unit] =
     val writerFiber = Stream
       .fromQueueNoneTerminated(writeQueue)
-      .foreach(chunk => socket.write(chunk))
+      .foreach(chunk =>
+        Async[F].timeoutTo(
+          socket.write(chunk),
+          config.writeTimeout,
+          Async[F].raiseError(
+            fs2.nats.errors.NatsError.ConnectionFailed("Write timed out")
+          )
+        )
+      )
       .compile
       .drain
       .handleErrorWith { err =>
@@ -84,21 +118,21 @@ object TlsTransport:
           Async[F].raiseError(err)
       }
 
-    Resource.make(Async[F].start(writerFiber))(_ =>
-      writeQueue.offer(None) *> Async[F].unit
-    ).void
+    Resource
+      .make(Async[F].start(writerFiber))(_ =>
+        writeQueue.offer(None) *> Async[F].unit
+      )
+      .void
 
   private class TlsSocketTransport[F[_]: Async](
       socket: TLSSocket[F],
       writeQueue: Queue[F, Option[Chunk[Byte]]],
       connectedRef: Ref[F, Boolean],
-      config: TransportConfig,
       parserConfig: ParserConfig
   ) extends Transport[F]:
 
     override def frames: Stream[F, NatsFrame] =
-      socket
-        .reads
+      socket.reads
         .through(ProtocolParser.parseStream(parserConfig))
 
     override def send(bytes: Chunk[Byte]): F[Unit] =

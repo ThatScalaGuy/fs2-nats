@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.protocol
@@ -96,7 +102,9 @@ class HeadersSpec extends CatsEffectSuite:
   }
 
   test("parse headers from bytes") {
-    val input = Chunk.array("NATS/1.0\r\nFoo: bar\r\n\r\n".getBytes(StandardCharsets.UTF_8))
+    val input = Chunk.array(
+      "NATS/1.0\r\nFoo: bar\r\n\r\n".getBytes(StandardCharsets.UTF_8)
+    )
     val result = Headers.parse(input)
 
     assert(result.isRight)
@@ -179,7 +187,10 @@ class HeadersSpec extends CatsEffectSuite:
     )
     val values = headers.getAll("Accept")
     assertEquals(values.size, 3)
-    assertEquals(values.toList, List("text/plain", "application/json", "text/html"))
+    assertEquals(
+      values.toList,
+      List("text/plain", "application/json", "text/html")
+    )
   }
 
   test("get returns first value for multi-value header") {

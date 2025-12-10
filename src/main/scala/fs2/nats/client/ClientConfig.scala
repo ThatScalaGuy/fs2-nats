@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.client
@@ -14,69 +20,67 @@ import scala.concurrent.duration.*
 import com.comcast.ip4s.{Host, Port}
 import fs2.io.net.tls.TLSParameters
 
-/**
- * Policy for handling slow consumers when subscription queues fill up.
- */
+/** Policy for handling slow consumers when subscription queues fill up.
+  */
 enum SlowConsumerPolicy:
-  /**
-   * Block the reader until queue space is available.
-   * This applies backpressure to the server connection.
-   */
+  /** Block the reader until queue space is available. This applies backpressure
+    * to the server connection.
+    */
   case Block
 
-  /**
-   * Drop the oldest message in the queue to make room.
-   * Useful when only recent messages matter.
-   */
+  /** Drop the oldest message in the queue to make room. Useful when only recent
+    * messages matter.
+    */
   case DropOldest
 
-  /**
-   * Drop the new incoming message.
-   * Preserves message order in the queue.
-   */
+  /** Drop the new incoming message. Preserves message order in the queue.
+    */
   case DropNew
 
-  /**
-   * Emit a SlowConsumer error event but continue processing.
-   * Combines with DropNew behavior.
-   */
+  /** Emit a SlowConsumer error event but continue processing. Combines with
+    * DropNew behavior.
+    */
   case ErrorAndDrop
 
-/**
- * Credentials for NATS authentication.
- */
+/** Credentials for NATS authentication.
+  */
 enum NatsCredentials:
-  /**
-   * Username/password authentication.
-   *
-   * @param username The username
-   * @param password The password
-   */
+  /** Username/password authentication.
+    *
+    * @param username
+    *   The username
+    * @param password
+    *   The password
+    */
   case UserPassword(username: String, password: String)
 
-  /**
-   * Token-based authentication.
-   *
-   * @param token The authentication token
-   */
+  /** Token-based authentication.
+    *
+    * @param token
+    *   The authentication token
+    */
   case Token(token: String)
 
-  /**
-   * NKey authentication with optional JWT.
-   *
-   * @param nkey The public NKey
-   * @param jwt Optional user JWT
-   */
+  /** NKey authentication with optional JWT.
+    *
+    * @param nkey
+    *   The public NKey
+    * @param jwt
+    *   Optional user JWT
+    */
   case NKey(nkey: String, jwt: Option[String] = None)
 
-/**
- * Configuration for exponential backoff with jitter.
- *
- * @param baseDelay The initial delay before first retry
- * @param maxDelay The maximum delay between retries
- * @param factor The multiplier applied to delay after each retry
- * @param maxRetries Optional maximum number of retry attempts (None for unlimited)
- */
+/** Configuration for exponential backoff with jitter.
+  *
+  * @param baseDelay
+  *   The initial delay before first retry
+  * @param maxDelay
+  *   The maximum delay between retries
+  * @param factor
+  *   The multiplier applied to delay after each retry
+  * @param maxRetries
+  *   Optional maximum number of retry attempts (None for unlimited)
+  */
 final case class BackoffConfig(
     baseDelay: FiniteDuration = 100.millis,
     maxDelay: FiniteDuration = 30.seconds,
@@ -85,7 +89,9 @@ final case class BackoffConfig(
 )
 
 object BackoffConfig:
-  /** Default backoff configuration: 100ms base, 30s max, factor 2.0, unlimited retries */
+  /** Default backoff configuration: 100ms base, 30s max, factor 2.0, unlimited
+    * retries
+    */
   val default: BackoffConfig = BackoffConfig()
 
   /** Fast backoff for testing: 10ms base, 1s max */
@@ -100,23 +106,35 @@ object BackoffConfig:
     maxDelay = 5.minutes
   )
 
-/**
- * Configuration for the NATS client connection.
- *
- * @param host The NATS server host
- * @param port The NATS server port (default: 4222)
- * @param useTls Whether to use TLS encryption
- * @param tlsParams Optional TLS parameters for custom configuration
- * @param name Optional client name for server identification
- * @param credentials Optional authentication credentials
- * @param backoff Backoff configuration for reconnection attempts
- * @param queueCapacity Default capacity for subscription message queues
- * @param slowConsumerPolicy Policy for handling full subscription queues
- * @param idleTimeout Optional timeout for idle connections
- * @param verbose Whether to enable verbose mode (+OK acknowledgements)
- * @param pedantic Whether to enable pedantic mode (stricter checking)
- * @param echo Whether the server should echo messages back to the publishing connection
- */
+/** Configuration for the NATS client connection.
+  *
+  * @param host
+  *   The NATS server host
+  * @param port
+  *   The NATS server port (default: 4222)
+  * @param useTls
+  *   Whether to use TLS encryption
+  * @param tlsParams
+  *   Optional TLS parameters for custom configuration
+  * @param name
+  *   Optional client name for server identification
+  * @param credentials
+  *   Optional authentication credentials
+  * @param backoff
+  *   Backoff configuration for reconnection attempts
+  * @param queueCapacity
+  *   Default capacity for subscription message queues
+  * @param slowConsumerPolicy
+  *   Policy for handling full subscription queues
+  * @param idleTimeout
+  *   Optional timeout for idle connections
+  * @param verbose
+  *   Whether to enable verbose mode (+OK acknowledgements)
+  * @param pedantic
+  *   Whether to enable pedantic mode (stricter checking)
+  * @param echo
+  *   Whether the server should echo messages back to the publishing connection
+  */
 final case class ClientConfig(
     host: Host,
     port: Port = Port.fromInt(4222).get,
@@ -134,25 +152,27 @@ final case class ClientConfig(
 )
 
 object ClientConfig:
-  /**
-   * Create a minimal configuration for localhost.
-   *
-   * @param port The port to connect to (default: 4222)
-   * @return ClientConfig for localhost connection
-   */
+  /** Create a minimal configuration for localhost.
+    *
+    * @param port
+    *   The port to connect to (default: 4222)
+    * @return
+    *   ClientConfig for localhost connection
+    */
   def localhost(port: Int = 4222): ClientConfig =
     ClientConfig(
       host = Host.fromString("localhost").get,
       port = Port.fromInt(port).get
     )
 
-  /**
-   * Create a configuration from a NATS URL.
-   * Supports: nats://host:port, tls://host:port
-   *
-   * @param url The NATS URL
-   * @return Either an error message or the parsed ClientConfig
-   */
+  /** Create a configuration from a NATS URL. Supports: nats://host:port,
+    * tls://host:port
+    *
+    * @param url
+    *   The NATS URL
+    * @return
+    *   Either an error message or the parsed ClientConfig
+    */
   def fromUrl(url: String): Either[String, ClientConfig] =
     val natsPattern = """^(nats|tls)://([^:]+):(\d+)$""".r
     val natsPatternNoPort = """^(nats|tls)://([^:]+)$""".r
@@ -183,4 +203,6 @@ object ClientConfig:
           case None => Left(s"Invalid host: $hostStr")
 
       case _ =>
-        Left(s"Invalid NATS URL format: $url. Expected: nats://host:port or tls://host:port")
+        Left(
+          s"Invalid NATS URL format: $url. Expected: nats://host:port or tls://host:port"
+        )

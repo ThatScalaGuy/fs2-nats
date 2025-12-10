@@ -13,7 +13,7 @@ package fs2.nats.client
 import cats.effect.IO
 import cats.syntax.all.*
 import com.comcast.ip4s.{Host, Port}
-import fs2.{Chunk, Stream}
+import fs2.Chunk
 import fs2.io.net.Network
 import fs2.nats.protocol.Headers
 import munit.CatsEffectSuite
@@ -36,204 +36,249 @@ class ConnectionIntegrationSpec extends CatsEffectSuite:
   private def clientConfig = ClientConfig(
     host = natsHost,
     port = natsPort,
-    backoff = BackoffConfig.fast
+    backoff = BackoffConfig.fast.copy(maxRetries = Some(3))
   )
 
   test("connect to NATS server and receive server info") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      client.serverInfo.map { info =>
-        assert(info.serverId.nonEmpty)
-        assert(info.version.nonEmpty)
-        assert(info.maxPayload > 0)
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        client.serverInfo.map { info =>
+          assert(info.serverId.nonEmpty)
+          assert(info.version.nonEmpty)
+          assert(info.maxPayload > 0)
+        }
       }
-    }
+      .timeout(10.seconds)
   }
 
   test("publish and subscribe round-trip") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      val subject = s"test.${System.currentTimeMillis()}"
-      val payload = "Hello, NATS!"
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val subject = s"test.${System.currentTimeMillis()}"
+        val payload = "Hello, NATS!"
 
-      client.subscribe(subject).use { msgStream =>
-        for
-          _ <- IO.sleep(100.millis)
-          _ <- client.publish(subject, Chunk.array(payload.getBytes))
-          msg <- msgStream.take(1).compile.lastOrError
-        yield
-          assertEquals(msg.subject, subject)
-          assertEquals(msg.payloadAsString, payload)
+        client.subscribe(subject).use { msgStream =>
+          for
+            _ <- IO.sleep(100.millis)
+            _ <- client.publish(subject, Chunk.array(payload.getBytes))
+            msg <- msgStream.take(1).timeout(5.seconds).compile.lastOrError
+          yield
+            assertEquals(msg.subject, subject)
+            assertEquals(msg.payloadAsString, payload)
+        }
       }
-    }
+      .timeout(10.seconds)
   }
 
   test("publish and subscribe with headers") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      val subject = s"test.headers.${System.currentTimeMillis()}"
-      val payload = "Hello with headers!"
-      val headers = Headers("X-Custom" -> "value", "X-Other" -> "data")
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val subject = s"test.headers.${System.currentTimeMillis()}"
+        val payload = "Hello with headers!"
+        val headers = Headers("X-Custom" -> "value", "X-Other" -> "data")
 
-      client.subscribe(subject).use { msgStream =>
-        for
-          _ <- IO.sleep(100.millis)
-          _ <- client.publish(subject, Chunk.array(payload.getBytes), headers)
-          msg <- msgStream.take(1).compile.lastOrError
-        yield
-          assertEquals(msg.subject, subject)
-          assertEquals(msg.payloadAsString, payload)
-          assertEquals(msg.headers.get("X-Custom"), Some("value"))
-          assertEquals(msg.headers.get("X-Other"), Some("data"))
+        client.subscribe(subject).use { msgStream =>
+          for
+            _ <- IO.sleep(100.millis)
+            _ <- client.publish(subject, Chunk.array(payload.getBytes), headers)
+            msg <- msgStream.take(1).timeout(5.seconds).compile.lastOrError
+          yield
+            assertEquals(msg.subject, subject)
+            assertEquals(msg.payloadAsString, payload)
+            assertEquals(msg.headers.get("X-Custom"), Some("value"))
+            assertEquals(msg.headers.get("X-Other"), Some("data"))
+        }
       }
-    }
+      .timeout(10.seconds)
   }
 
   test("subscribe to wildcard subject") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      val baseSubject = s"test.wildcard.${System.currentTimeMillis()}"
-      val wildcard = s"$baseSubject.*"
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val baseSubject = s"test.wildcard.${System.currentTimeMillis()}"
+        val wildcard = s"$baseSubject.*"
 
-      client.subscribe(wildcard).use { msgStream =>
-        for
-          _ <- IO.sleep(100.millis)
-          _ <- client.publish(
-            s"$baseSubject.one",
-            Chunk.array("first".getBytes)
-          )
-          _ <- client.publish(
-            s"$baseSubject.two",
-            Chunk.array("second".getBytes)
-          )
-          messages <- msgStream.take(2).compile.toList
-        yield
-          assertEquals(messages.length, 2)
-          assert(messages.exists(_.payloadAsString == "first"))
-          assert(messages.exists(_.payloadAsString == "second"))
+        client.subscribe(wildcard).use { msgStream =>
+          for
+            _ <- IO.sleep(100.millis)
+            _ <- client.publish(
+              s"$baseSubject.one",
+              Chunk.array("first".getBytes)
+            )
+            _ <- client.publish(
+              s"$baseSubject.two",
+              Chunk.array("second".getBytes)
+            )
+            messages <- msgStream.take(2).timeout(5.seconds).compile.toList
+          yield
+            assertEquals(messages.length, 2)
+            assert(messages.exists(_.payloadAsString == "first"))
+            assert(messages.exists(_.payloadAsString == "second"))
+        }
       }
-    }
+      .timeout(10.seconds)
   }
 
   test("subscribe with queue group") {
-    NatsClient.connect[IO](clientConfig).use { client1 =>
-      NatsClient.connect[IO](clientConfig).use { client2 =>
-        val subject = s"test.queue.${System.currentTimeMillis()}"
-        val queueGroup = Some("workers")
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client1 =>
+        NatsClient.connect[IO](clientConfig).use { client2 =>
+          val subject = s"test.queue.${System.currentTimeMillis()}"
+          val queueGroup = Some("workers")
 
-        client1.subscribe(subject, queueGroup).use { stream1 =>
-          client2.subscribe(subject, queueGroup).use { stream2 =>
-            for
-              _ <- IO.sleep(100.millis)
+          client1.subscribe(subject, queueGroup).use { stream1 =>
+            client2.subscribe(subject, queueGroup).use { stream2 =>
+              for
+                _ <- IO.sleep(100.millis)
 
-              _ <- (1 to 10).toList.traverse_ { i =>
-                client1.publish(subject, Chunk.array(s"msg$i".getBytes))
-              }
+                _ <- (1 to 10).toList.traverse_ { i =>
+                  client1.publish(subject, Chunk.array(s"msg$i".getBytes))
+                }
 
-              msgs1 <- stream1.take(5).timeout(5.seconds).compile.toList.attempt
-              msgs2 <- stream2.take(5).timeout(5.seconds).compile.toList.attempt
-            yield
-              val count1 = msgs1.fold(_ => 0, _.length)
-              val count2 = msgs2.fold(_ => 0, _.length)
-              assert(count1 + count2 <= 10)
+                msgs1 <- stream1
+                  .take(5)
+                  .timeout(5.seconds)
+                  .compile
+                  .toList
+                  .attempt
+                msgs2 <- stream2
+                  .take(5)
+                  .timeout(5.seconds)
+                  .compile
+                  .toList
+                  .attempt
+              yield
+                val count1 = msgs1.fold(_ => 0, _.length)
+                val count2 = msgs2.fold(_ => 0, _.length)
+                assert(count1 + count2 <= 10)
+            }
           }
         }
       }
-    }
+      .timeout(15.seconds)
   }
 
   test("max_payload enforcement") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      for
-        info <- client.serverInfo
-        oversizedPayload = Chunk.array(
-          new Array[Byte]((info.maxPayload + 1).toInt)
-        )
-        result <- client.publish("test", oversizedPayload).attempt
-      yield
-        assert(result.isLeft)
-        result.left.toOption.get match
-          case err: fs2.nats.errors.NatsError.PayloadTooLarge =>
-            assert(err.size > info.maxPayload)
-          case other =>
-            fail(s"Expected PayloadTooLarge, got $other")
-    }
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        for
+          info <- client.serverInfo
+          oversizedPayload = Chunk.array(
+            new Array[Byte]((info.maxPayload + 1).toInt)
+          )
+          result <- client.publish("test", oversizedPayload).attempt
+        yield
+          assert(result.isLeft)
+          result.left.toOption.get match
+            case err: fs2.nats.errors.NatsError.PayloadTooLarge =>
+              assert(err.size > info.maxPayload)
+            case other =>
+              fail(s"Expected PayloadTooLarge, got $other")
+      }
+      .timeout(10.seconds)
   }
 
   test("PING/PONG keepalive") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      for
-        _ <- IO.sleep(5.seconds)
-        connected <- client.isConnected
-      yield assert(connected)
-    }
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        for
+          _ <- IO.sleep(5.seconds)
+          connected <- client.isConnected
+        yield assert(connected)
+      }
+      .timeout(10.seconds)
   }
 
   test("events stream receives Connected event") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      client.events
-        .collect { case e: ClientEvent.Connected => e }
-        .take(1)
-        .timeout(5.seconds)
-        .compile
-        .lastOrError
-        .map { event =>
-          assert(event.serverInfo.serverId.nonEmpty)
-        }
-    }
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        client.events
+          .collect { case e: ClientEvent.Connected => e }
+          .take(1)
+          .timeout(5.seconds)
+          .compile
+          .lastOrError
+          .map { event =>
+            assert(event.serverInfo.serverId.nonEmpty)
+          }
+      }
+      .timeout(10.seconds)
   }
 
   test("empty payload publish and subscribe") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      val subject = s"test.empty.${System.currentTimeMillis()}"
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val subject = s"test.empty.${System.currentTimeMillis()}"
 
-      client.subscribe(subject).use { msgStream =>
-        for
-          _ <- IO.sleep(100.millis)
-          _ <- client.publish(subject, Chunk.empty)
-          msg <- msgStream.take(1).compile.lastOrError
-        yield
-          assertEquals(msg.subject, subject)
-          assertEquals(msg.payloadSize, 0)
+        client.subscribe(subject).use { msgStream =>
+          for
+            _ <- IO.sleep(100.millis)
+            _ <- client.publish(subject, Chunk.empty)
+            msg <- msgStream.take(1).timeout(5.seconds).compile.lastOrError
+          yield
+            assertEquals(msg.subject, subject)
+            assertEquals(msg.payloadSize, 0)
+        }
       }
-    }
+      .timeout(10.seconds)
   }
 
   test("large payload publish and subscribe") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      val subject = s"test.large.${System.currentTimeMillis()}"
-      val size = 500000
-      val largePayload = Chunk.array(Array.fill[Byte](size)(42))
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val subject = s"test.large.${System.currentTimeMillis()}"
+        val size = 500000
+        val largePayload = Chunk.array(Array.fill[Byte](size)(42))
 
-      client.subscribe(subject).use { msgStream =>
-        for
-          _ <- IO.sleep(100.millis)
-          _ <- client.publish(subject, largePayload)
-          msg <- msgStream.take(1).compile.lastOrError
-        yield
-          assertEquals(msg.payloadSize, size)
-          assert(msg.payload.forall(_ == 42.toByte))
+        client.subscribe(subject).use { msgStream =>
+          for
+            _ <- IO.sleep(100.millis)
+            _ <- client.publish(subject, largePayload)
+            msg <- msgStream.take(1).timeout(5.seconds).compile.lastOrError
+          yield
+            assertEquals(msg.payloadSize, size)
+            assert(msg.payload.forall(_ == 42.toByte))
+        }
       }
-    }
+      .timeout(10.seconds)
   }
 
   test("multiple concurrent subscriptions") {
-    NatsClient.connect[IO](clientConfig).use { client =>
-      val subjects =
-        (1 to 5).map(i => s"test.concurrent.$i.${System.currentTimeMillis()}")
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val subjects =
+          (1 to 5).map(i => s"test.concurrent.$i.${System.currentTimeMillis()}")
 
-      subjects.toList
-        .traverse { subject =>
-          client.subscribe(subject)
-        }
-        .use { streams =>
-          for
-            _ <- IO.sleep(100.millis)
-            _ <- subjects.toList.zipWithIndex.traverse { case (subject, i) =>
-              client.publish(subject, Chunk.array(s"msg$i".getBytes))
-            }
-            messages <- streams.traverse(_.take(1).compile.lastOrError)
-          yield
-            assertEquals(messages.length, 5)
-            messages.zipWithIndex.foreach { case (msg, i) =>
-              assertEquals(msg.payloadAsString, s"msg$i")
-            }
-        }
-    }
+        subjects.toList
+          .traverse { subject =>
+            client.subscribe(subject)
+          }
+          .use { streams =>
+            for
+              _ <- IO.sleep(100.millis)
+              _ <- subjects.toList.zipWithIndex.traverse { case (subject, i) =>
+                client.publish(subject, Chunk.array(s"msg$i".getBytes))
+              }
+              messages <- streams.traverse(
+                _.take(1).timeout(5.seconds).compile.lastOrError
+              )
+            yield
+              assertEquals(messages.length, 5)
+              messages.zipWithIndex.foreach { case (msg, i) =>
+                assertEquals(msg.payloadAsString, s"msg$i")
+              }
+          }
+      }
+      .timeout(10.seconds)
   }

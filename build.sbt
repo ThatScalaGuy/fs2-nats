@@ -27,12 +27,14 @@ ThisBuild / githubWorkflowJavaVersions := Seq(
 )
 
 ThisBuild / scalaVersion := V.scala3
+ThisBuild / scalacOptions ++= Seq(
+  "-Wunused:all"
+)
 
 lazy val root = project
   .in(file("."))
   .settings(
     name := "fs2-nats",
-    version := "0.1.0-SNAPSHOT",
     scalaVersion := V.scala3,
     libraryDependencies ++= Seq(
       "org.typelevel" %% "cats-effect" % V.catsEffect,

@@ -1,22 +1,27 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.subscriptions
 
-import cats.effect.{Async, Ref, Resource}
+import cats.effect.{Async, Ref}
 import cats.effect.std.Queue
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.nats.client.{ClientEvent, SlowConsumerPolicy}
 import fs2.nats.protocol.{Headers, NatsFrame}
-import cats.effect.std.MapRef
 
 /** Handle for managing a subscription. Provides methods to unsubscribe and
   * configure message delivery.
@@ -214,18 +219,17 @@ object SubscriptionManager:
       frame match
         case NatsFrame.MsgFrame(subject, sid, replyTo, payload) =>
           val msg = NatsMessage(subject, replyTo, Headers.empty, payload, sid)
-          deliverMessage(sid, subject, msg)
+          deliverMessage(sid, msg)
 
         case NatsFrame.HMsgFrame(subject, sid, replyTo, headers, _, payload) =>
           val msg = NatsMessage(subject, replyTo, headers, payload, sid)
-          deliverMessage(sid, subject, msg)
+          deliverMessage(sid, msg)
 
         case _ =>
           Async[F].pure(None)
 
     private def deliverMessage(
         sid: Long,
-        subject: String,
         msg: NatsMessage
     ): F[Option[ClientEvent.SlowConsumer]] =
       subsRef.get.flatMap { subs =>

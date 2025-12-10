@@ -1,11 +1,17 @@
 /*
- * Copyright 2024 fs2-nats contributors
+ * Copyright 2025 ThatScalaGuy
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package fs2.nats.protocol
@@ -18,14 +24,16 @@ import java.nio.charset.StandardCharsets
 class ProtocolParserSpec extends CatsEffectSuite:
 
   private def parseBytes(bytes: Array[Byte]): IO[List[NatsFrame]] =
-    Stream.emit(Chunk.array(bytes))
+    Stream
+      .emit(Chunk.array(bytes))
       .unchunks
       .through(ProtocolParser.parseStream[IO])
       .compile
       .toList
 
   private def parseChunks(chunks: List[Chunk[Byte]]): IO[List[NatsFrame]] =
-    Stream.emits(chunks)
+    Stream
+      .emits(chunks)
       .unchunks
       .through(ProtocolParser.parseStream[IO])
       .compile
@@ -53,7 +61,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
 
   test("parse multiple PING/PONG") {
     parseString("PING\r\nPONG\r\nPING\r\n").map { frames =>
-      assertEquals(frames, List(NatsFrame.PingFrame, NatsFrame.PongFrame, NatsFrame.PingFrame))
+      assertEquals(
+        frames,
+        List(NatsFrame.PingFrame, NatsFrame.PongFrame, NatsFrame.PingFrame)
+      )
     }
   }
 
@@ -73,14 +84,18 @@ class ProtocolParserSpec extends CatsEffectSuite:
 
   test("parse -ERR without quotes") {
     parseString("-ERR Unknown Protocol Operation\r\n").map { frames =>
-      assertEquals(frames, List(NatsFrame.ErrFrame("Unknown Protocol Operation")))
+      assertEquals(
+        frames,
+        List(NatsFrame.ErrFrame("Unknown Protocol Operation"))
+      )
     }
   }
 
   // --- INFO Tests ---
 
   test("parse INFO frame") {
-    val infoJson = """{"server_id":"test","version":"2.9.0","proto":1,"go":"go1.19","host":"0.0.0.0","port":4222,"max_payload":1048576}"""
+    val infoJson =
+      """{"server_id":"test","version":"2.9.0","proto":1,"go":"go1.19","host":"0.0.0.0","port":4222,"max_payload":1048576}"""
     parseString(s"INFO $infoJson\r\n").map { frames =>
       assertEquals(frames.length, 1)
       frames.head match
@@ -95,7 +110,8 @@ class ProtocolParserSpec extends CatsEffectSuite:
   }
 
   test("parse INFO with headers support") {
-    val infoJson = """{"server_id":"test","version":"2.9.0","proto":1,"go":"go1.19","host":"0.0.0.0","port":4222,"max_payload":1048576,"headers":true}"""
+    val infoJson =
+      """{"server_id":"test","version":"2.9.0","proto":1,"go":"go1.19","host":"0.0.0.0","port":4222,"max_payload":1048576,"headers":true}"""
     parseString(s"INFO $infoJson\r\n").map { frames =>
       frames.head match
         case NatsFrame.InfoFrame(info) =>
@@ -115,7 +131,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
           assertEquals(subject, "FOO.BAR")
           assertEquals(sid, 1L)
           assertEquals(replyTo, None)
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "Hello")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "Hello"
+          )
         case other =>
           fail(s"Expected MsgFrame, got $other")
     }
@@ -129,7 +148,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
           assertEquals(subject, "FOO.BAR")
           assertEquals(sid, 42L)
           assertEquals(replyTo, Some("INBOX.123"))
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "Hello")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "Hello"
+          )
         case other =>
           fail(s"Expected MsgFrame, got $other")
     }
@@ -154,14 +176,20 @@ class ProtocolParserSpec extends CatsEffectSuite:
         case NatsFrame.MsgFrame(subject, sid, _, payload) =>
           assertEquals(subject, "FOO")
           assertEquals(sid, 1L)
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "Hello")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "Hello"
+          )
         case other =>
           fail(s"Expected MsgFrame, got $other")
       frames(1) match
         case NatsFrame.MsgFrame(subject, sid, _, payload) =>
           assertEquals(subject, "BAR")
           assertEquals(sid, 2L)
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "World")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "World"
+          )
         case other =>
           fail(s"Expected MsgFrame, got $other")
     }
@@ -179,7 +207,14 @@ class ProtocolParserSpec extends CatsEffectSuite:
     parseString(data).map { frames =>
       assertEquals(frames.length, 1)
       frames.head match
-        case NatsFrame.HMsgFrame(subject, sid, replyTo, hdrs, statusCode, pay) =>
+        case NatsFrame.HMsgFrame(
+              subject,
+              sid,
+              replyTo,
+              hdrs,
+              statusCode,
+              pay
+            ) =>
           assertEquals(subject, "FOO")
           assertEquals(sid, 1L)
           assertEquals(replyTo, None)
@@ -196,7 +231,8 @@ class ProtocolParserSpec extends CatsEffectSuite:
     val payload = "test"
     val headerLen = headers.length
     val totalLen = headerLen + payload.length
-    val data = s"HMSG FOO 1 INBOX.X $headerLen $totalLen\r\n${headers}${payload}\r\n"
+    val data =
+      s"HMSG FOO 1 INBOX.X $headerLen $totalLen\r\n${headers}${payload}\r\n"
 
     parseString(data).map { frames =>
       frames.head match
@@ -276,7 +312,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
       assertEquals(frames.length, 1)
       frames.head match
         case NatsFrame.MsgFrame(_, _, _, payload) =>
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "HelloWorld")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "HelloWorld"
+          )
         case other =>
           fail(s"Expected MsgFrame, got $other")
     }
@@ -290,7 +329,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
       frames.head match
         case NatsFrame.MsgFrame(subject, _, _, payload) =>
           assertEquals(subject, "FOO")
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "Hello")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "Hello"
+          )
         case other =>
           fail(s"Expected MsgFrame, got $other")
     }
@@ -326,7 +368,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
   test("parse multiple frames in single chunk") {
     val data = "PING\r\nPONG\r\n+OK\r\n"
     parseString(data).map { frames =>
-      assertEquals(frames, List(NatsFrame.PingFrame, NatsFrame.PongFrame, NatsFrame.OkFrame))
+      assertEquals(
+        frames,
+        List(NatsFrame.PingFrame, NatsFrame.PongFrame, NatsFrame.OkFrame)
+      )
     }
   }
 
@@ -337,12 +382,18 @@ class ProtocolParserSpec extends CatsEffectSuite:
       frames(0) match
         case NatsFrame.MsgFrame(subject, _, _, payload) =>
           assertEquals(subject, "A")
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "abc")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "abc"
+          )
         case _ => fail("Expected MsgFrame")
       frames(1) match
         case NatsFrame.MsgFrame(subject, _, _, payload) =>
           assertEquals(subject, "B")
-          assertEquals(new String(payload.toArray, StandardCharsets.UTF_8), "xyz")
+          assertEquals(
+            new String(payload.toArray, StandardCharsets.UTF_8),
+            "xyz"
+          )
         case _ => fail("Expected MsgFrame")
     }
   }
@@ -406,7 +457,8 @@ class ProtocolParserSpec extends CatsEffectSuite:
     val config = ParserConfig(maxControlLineLength = 10, strictMode = true)
     val longLine = "A" * 20 + "\r\n"
 
-    Stream.emit(toBytes(longLine))
+    Stream
+      .emit(toBytes(longLine))
       .unchunks
       .through(ProtocolParser.parseStream[IO](config))
       .compile
@@ -423,7 +475,8 @@ class ProtocolParserSpec extends CatsEffectSuite:
   test("emit parse error for unrecognized command in non-strict mode") {
     val config = ParserConfig(strictMode = false)
 
-    Stream.emit(toBytes("UNKNOWN command\r\n"))
+    Stream
+      .emit(toBytes("UNKNOWN command\r\n"))
       .unchunks
       .through(ProtocolParser.parseStream[IO](config))
       .compile
@@ -441,7 +494,8 @@ class ProtocolParserSpec extends CatsEffectSuite:
   test("fail on invalid MSG format") {
     val config = ParserConfig(strictMode = true)
 
-    Stream.emit(toBytes("MSG only_subject\r\n"))
+    Stream
+      .emit(toBytes("MSG only_subject\r\n"))
       .unchunks
       .through(ProtocolParser.parseStream[IO](config))
       .compile
@@ -459,7 +513,8 @@ class ProtocolParserSpec extends CatsEffectSuite:
     val config = ParserConfig(maxPayloadLimit = Some(100), strictMode = true)
     val data = "MSG FOO 1 1000\r\n" + ("x" * 1000) + "\r\n"
 
-    Stream.emit(toBytes(data))
+    Stream
+      .emit(toBytes(data))
       .unchunks
       .through(ProtocolParser.parseStream[IO](config))
       .compile
@@ -496,8 +551,10 @@ class ProtocolParserSpec extends CatsEffectSuite:
   }
 
   test("parse sequence of different frame types") {
-    val infoJson = """{"server_id":"x","version":"2.0","proto":1,"go":"1","host":"h","port":4222,"max_payload":1024}"""
-    val data = s"INFO $infoJson\r\nPING\r\nMSG FOO 1 4\r\ntest\r\nPONG\r\n+OK\r\n"
+    val infoJson =
+      """{"server_id":"x","version":"2.0","proto":1,"go":"1","host":"h","port":4222,"max_payload":1024}"""
+    val data =
+      s"INFO $infoJson\r\nPING\r\nMSG FOO 1 4\r\ntest\r\nPONG\r\n+OK\r\n"
 
     parseString(data).map { frames =>
       assertEquals(frames.length, 5)
