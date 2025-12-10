@@ -16,7 +16,6 @@
 
 package fs2.nats.protocol
 
-import cats.effect.IO
 import fs2.Chunk
 import munit.CatsEffectSuite
 import java.nio.charset.StandardCharsets

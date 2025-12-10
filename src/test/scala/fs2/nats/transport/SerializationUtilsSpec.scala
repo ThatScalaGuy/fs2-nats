@@ -16,7 +16,6 @@
 
 package fs2.nats.transport
 
-import cats.effect.IO
 import munit.CatsEffectSuite
 import fs2.Chunk
 import fs2.nats.publish.SerializationUtils

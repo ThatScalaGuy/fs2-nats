@@ -18,12 +18,10 @@ package fs2.nats.subscriptions
 
 import cats.effect.IO
 import cats.effect.kernel.Ref
-import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
 import fs2.nats.client.SlowConsumerPolicy
 import fs2.nats.protocol.{Headers, NatsFrame}
-import scala.concurrent.duration.*
 
 class SubscriptionManagerSpec extends CatsEffectSuite:
 
@@ -45,7 +43,7 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
   test("register subscription and receive messages") {
     createManager().flatMap { case (manager, _) =>
       manager.register(1, "test.subject", None).flatMap { result =>
-        val (stream, handle) = result
+        val (stream, _) = result
         manager
           .routeMessage(
             NatsFrame
@@ -171,10 +169,8 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
 
   test("closeAll terminates all subscriptions") {
     createManager().flatMap { case (manager, _) =>
-      manager.register(1, "foo", None).flatMap { result1 =>
-        manager.register(2, "bar", None).flatMap { result2 =>
-          val (stream1, _) = result1
-          val (stream2, _) = result2
+      manager.register(1, "foo", None).flatMap { _ =>
+        manager.register(2, "bar", None).flatMap { _ =>
           manager.closeAll.flatMap { _ =>
             manager.activeSubscriptions.map { active =>
               assertEquals(active, List.empty)
@@ -267,8 +263,7 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
   test("SlowConsumerPolicy.ErrorAndDrop emits event") {
     createManager(queueCapacity = 1, policy = SlowConsumerPolicy.ErrorAndDrop)
       .flatMap { case (manager, _) =>
-        manager.register(1, "test", None).flatMap { result =>
-          val (stream, _) = result
+        manager.register(1, "test", None).flatMap { _ =>
           manager
             .routeMessage(
               NatsFrame.MsgFrame("test", 1, None, Chunk.array("1".getBytes))

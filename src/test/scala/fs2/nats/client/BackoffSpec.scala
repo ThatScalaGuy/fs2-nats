@@ -16,7 +16,6 @@
 
 package fs2.nats.client
 
-import cats.effect.IO
 import munit.CatsEffectSuite
 import scala.concurrent.duration.*
 
