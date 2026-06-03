@@ -217,29 +217,34 @@ object Headers:
       if errors.nonEmpty then Left(errors.mkString("; "))
       else Right(Headers(parsed.collect { case Right(kv) => kv }))
 
-  /** Parse headers from NATS/1.0 format bytes, extracting status code if
-    * present. Status codes appear as "NATS/1.0 503" for no-responders, etc.
+  /** Parse headers from NATS/1.0 format bytes, extracting the status code and
+    * description if present. Control messages appear as "NATS/1.0 503" or
+    * "NATS/1.0 100 Idle Heartbeat", etc.
     *
     * @param bytes
     *   The header bytes to parse
     * @return
-    *   Either a parse error or tuple of (optional status code, Headers)
+    *   Either a parse error or tuple of (optional status code, optional status
+    *   description, Headers)
     */
   def parseWithStatus(
       bytes: Chunk[Byte]
-  ): Either[String, (Option[Int], Headers)] =
+  ): Either[String, (Option[Int], Option[String], Headers)] =
     val str = new String(bytes.toArray, StandardCharsets.UTF_8)
     parseWithStatus(str)
 
-  /** Parse headers from NATS/1.0 format string, extracting status code if
-    * present.
+  /** Parse headers from NATS/1.0 format string, extracting the status code and
+    * description if present.
     *
     * @param str
     *   The header string to parse
     * @return
-    *   Either a parse error or tuple of (optional status code, Headers)
+    *   Either a parse error or tuple of (optional status code, optional status
+    *   description, Headers)
     */
-  def parseWithStatus(str: String): Either[String, (Option[Int], Headers)] =
+  def parseWithStatus(
+      str: String
+  ): Either[String, (Option[Int], Option[String], Headers)] =
     val lines = str.split("\r\n", -1).toVector
     if lines.isEmpty then Left("Invalid NATS headers: empty input")
     else
@@ -247,11 +252,22 @@ object Headers:
       if !versionLine.startsWith(Version) then
         Left(s"Invalid NATS headers: missing or invalid version line")
       else
-        val statusCode =
+        // The version line is "NATS/1.0 <code> <description>" for control
+        // messages (e.g. "NATS/1.0 100 Idle Heartbeat"). Split the leading
+        // status code from the trailing description so callers can match on
+        // both; a bare "NATS/1.0 503" yields a code with no description.
+        val (statusCode, statusDescription) =
           if versionLine.length > Version.length then
             val rest = versionLine.substring(Version.length).trim
-            if rest.nonEmpty then rest.toIntOption else None
-          else None
+            if rest.isEmpty then (None, None)
+            else
+              val spaceIdx = rest.indexWhere(_.isWhitespace)
+              if spaceIdx < 0 then (rest.toIntOption, None)
+              else
+                val code = rest.substring(0, spaceIdx).toIntOption
+                val desc = rest.substring(spaceIdx + 1).trim
+                (code, if desc.nonEmpty then Some(desc) else None)
+          else (None, None)
 
         val headerLines = lines.tail.takeWhile(_.nonEmpty)
         val parsed = headerLines.map { line =>
@@ -266,4 +282,10 @@ object Headers:
         val errors = parsed.collect { case Left(e) => e }
         if errors.nonEmpty then Left(errors.mkString("; "))
         else
-          Right((statusCode, Headers(parsed.collect { case Right(kv) => kv })))
+          Right(
+            (
+              statusCode,
+              statusDescription,
+              Headers(parsed.collect { case Right(kv) => kv })
+            )
+          )

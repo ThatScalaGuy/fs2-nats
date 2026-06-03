@@ -310,7 +310,7 @@ object ProtocolParser:
         val payloadBytes = fullPayload.drop(headerLen)
 
         Headers.parseWithStatus(headerBytes) match
-          case Right((statusCode, headers)) =>
+          case Right((statusCode, statusDescription, headers)) =>
             Pull.output1(
               NatsFrame.HMsgFrame(
                 subject,
@@ -318,6 +318,7 @@ object ProtocolParser:
                 replyTo,
                 headers,
                 statusCode,
+                statusDescription,
                 payloadBytes
               )
             ) >>

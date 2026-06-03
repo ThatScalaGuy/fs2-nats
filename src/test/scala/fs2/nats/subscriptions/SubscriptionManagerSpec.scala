@@ -140,6 +140,7 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
               Some("reply"),
               headers,
               None,
+              None,
               Chunk.array("data".getBytes)
             )
           )
@@ -149,6 +150,33 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
               assertEquals(msg.headers.get("X-Custom"), Some("value"))
               assertEquals(msg.replyTo, Some("reply"))
               assertEquals(msg.payloadAsString, "data")
+            }
+          }
+      }
+    }
+  }
+
+  test("route HMSG frame propagates status code and description") {
+    createManager().flatMap { case (manager, _) =>
+      manager.register(1, "test", None).flatMap { result =>
+        val (stream, _) = result
+        manager
+          .routeMessage(
+            NatsFrame.HMsgFrame(
+              "test",
+              1,
+              None,
+              Headers.empty,
+              Some(100),
+              Some("Idle Heartbeat"),
+              Chunk.empty
+            )
+          )
+          .flatMap { _ =>
+            stream.take(1).compile.toList.map { messages =>
+              val msg = messages.head
+              assertEquals(msg.status, Some(100))
+              assertEquals(msg.statusDescription, Some("Idle Heartbeat"))
             }
           }
       }

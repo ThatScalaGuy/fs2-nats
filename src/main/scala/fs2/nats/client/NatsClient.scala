@@ -23,10 +23,13 @@ import fs2.{Chunk, Stream}
 import fs2.io.net.Network
 import fs2.io.net.tls.TLSContext
 import fs2.nats.errors.NatsError
+import fs2.nats.jetstream.{JetStream, JetStreamConfig}
 import fs2.nats.protocol.{Headers, Info, NatsFrame, ParserConfig}
 import fs2.nats.publish.{Publisher, SerializationUtils}
 import fs2.nats.subscriptions.{NatsMessage, SidAllocator, SubscriptionManager}
 import fs2.nats.transport.TransportConfig
+
+import scala.concurrent.duration.*
 
 /** NATS client for publishing and subscribing to messages.
   *
@@ -75,6 +78,48 @@ trait NatsClient[F[_]]:
       subject: String,
       queueGroup: Option[String] = None
   ): Resource[F, Stream[F, NatsMessage]]
+
+  /** Send a request and await a single reply, using a shared response inbox.
+    *
+    * Publishes the payload to `subject` with a unique reply-to inbox and waits
+    * for the first reply. Fails with [[fs2.nats.errors.NatsError.NoResponders]]
+    * if the server reports that no subscribers are listening (503), or
+    * [[fs2.nats.errors.NatsError.Timeout]] if no reply arrives within
+    * `timeout`.
+    *
+    * @param subject
+    *   The subject to send the request to
+    * @param payload
+    *   The request payload
+    * @param headers
+    *   Optional request headers (default empty)
+    * @param timeout
+    *   How long to wait for a reply (default 5 seconds)
+    * @return
+    *   The reply message
+    */
+  def request(
+      subject: String,
+      payload: Chunk[Byte],
+      headers: Headers = Headers.empty,
+      timeout: FiniteDuration = 5.seconds
+  ): F[NatsMessage]
+
+  /** Create a JetStream context over this connection.
+    *
+    * The returned `Resource` scopes the JetStream context's resources (publish
+    * window and supervised fibers). When no `domain` is configured, the context
+    * verifies the server reports JetStream enabled, failing with
+    * [[fs2.nats.errors.NatsError.JetStreamNotEnabled]] otherwise.
+    *
+    * @param config
+    *   JetStream configuration (prefix/domain/timeout)
+    * @return
+    *   A resource managing the JetStream context lifecycle
+    */
+  def jetStream(
+      config: JetStreamConfig = JetStreamConfig.default
+  ): Resource[F, JetStream[F]]
 
   /** Stream of client events (connections, disconnections, errors).
     *
@@ -167,11 +212,22 @@ object NatsClient:
       closedRef <- Resource.eval(Ref.of[F, Boolean](false))
       supervisor <- Supervisor[F]
 
+      requestor <- Resource.eval(
+        Requestor[F](
+          subManager,
+          sidAllocator,
+          publisher,
+          connManager.send,
+          supervisor
+        )
+      )
+
       client = new NatsClientImpl[F](
         connManager,
         subManager,
         sidAllocator,
         publisher,
+        requestor,
         eventQueue,
         closedRef,
         supervisor
@@ -200,6 +256,7 @@ object NatsClient:
       subManager: SubscriptionManager[F],
       sidAllocator: SidAllocator[F],
       publisher: Publisher[F],
+      requestor: Requestor[F],
       eventQueue: Queue[F, ClientEvent],
       closedRef: Ref[F, Boolean],
       supervisor: Supervisor[F]
@@ -260,7 +317,7 @@ object NatsClient:
              else Async[F].unit)
 
         case msg @ (NatsFrame.MsgFrame(_, _, _, _) |
-            NatsFrame.HMsgFrame(_, _, _, _, _, _)) =>
+            NatsFrame.HMsgFrame(_, _, _, _, _, _, _)) =>
           subManager.routeMessage(msg).flatMap {
             case Some(slowConsumer) => eventQueue.offer(slowConsumer)
             case None               => Async[F].unit
@@ -284,6 +341,26 @@ object NatsClient:
       checkClosed *>
         (if headers.isEmpty then publisher.publish(subject, payload, replyTo)
          else publisher.publishWithHeaders(subject, payload, headers, replyTo))
+
+    override def request(
+        subject: String,
+        payload: Chunk[Byte],
+        headers: Headers,
+        timeout: FiniteDuration
+    ): F[NatsMessage] =
+      checkClosed *> requestor.request(subject, payload, headers, timeout)
+
+    override def jetStream(
+        config: JetStreamConfig
+    ): Resource[F, JetStream[F]] =
+      val guard =
+        if config.domain.isDefined then Async[F].unit
+        else
+          serverInfo.flatMap { info =>
+            if info.jetStream then Async[F].unit
+            else Async[F].raiseError[Unit](NatsError.JetStreamNotEnabled)
+          }
+      Resource.eval(checkClosed *> guard) >> JetStream(this, config)
 
     override def subscribe(
         subject: String,

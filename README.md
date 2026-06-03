@@ -6,6 +6,8 @@ A functional, streaming NATS client for Scala 3, built on [FS2](https://fs2.io/)
 
 - **Pure functional** - Built entirely on Cats Effect 3 and FS2
 - **Streaming first** - Native FS2 streams for message handling
+- **Request/Reply** - Shared-inbox request primitive with no-responders fast-fail
+- **JetStream** - Streams, consumers, persistent publish (PubAck), pull & push consume with full ack semantics
 - **Headers support** - Full NATS 2.2+ headers support (HPUB/HMSG)
 - **Backpressure** - Configurable slow consumer policies
 - **Reconnection** - Exponential backoff with full jitter
@@ -130,6 +132,78 @@ client.events.evalMap {
 }.compile.drain
 ```
 
+### Request/Reply
+
+```scala
+// Send a request and await a single reply (shared response inbox).
+val reply = client.request("service.echo", Chunk.array("ping".getBytes))
+// Fails fast with NatsError.NoResponders if nobody is listening (503),
+// or NatsError.Timeout if no reply arrives within the timeout.
+```
+
+## JetStream
+
+JetStream is obtained as a `Resource` over a connected client (requires a
+JetStream-enabled server, e.g. `nats-server -js`). It owns the publish window
+and supervised fibers, and releases them with the `Resource`.
+
+```scala
+import fs2.nats.jetstream.*
+import fs2.nats.jetstream.protocol.*
+
+client.jetStream().use { js =>
+  for
+    // Stream management
+    _   <- js.addStream(StreamConfig(name = "ORDERS", subjects = List("orders.>")))
+
+    // Persistent publish with PubAck (+ dedup via Nats-Msg-Id)
+    ack <- js.publish(
+             "orders.new",
+             Chunk.array("order #1".getBytes),
+             opts = PublishOptions(msgId = Some("order-1"))
+           )
+    _   <- IO.println(s"stored seq=${ack.seq} duplicate=${ack.duplicate}")
+
+    // Pull consumer: create + fetch + ack
+    c   <- js.createConsumer(
+             "ORDERS",
+             ConsumerConfig(durable = Some("workers"), filterSubject = Some("orders.new"))
+           )
+    msgs <- c.fetch(batch = 10, maxWait = 2.seconds)
+    _    <- msgs.traverse_(m => process(m.payload) *> m.ack)
+  yield ()
+}
+```
+
+Continuous pull consumption (background pull loop owned by the `Resource`):
+
+```scala
+c.consume().use { stream =>
+  stream.evalMap(m => process(m.payload) *> m.ack).compile.drain
+}
+```
+
+Push consumption (durable or ephemeral, optional queue group). Idle heartbeats
+are filtered and flow-control requests answered automatically; ephemeral
+consumers are deleted on release:
+
+```scala
+js.subscribePush(
+    "ORDERS",
+    ConsumerConfig(durable = Some("push-workers"), deliverGroup = Some("workers"))
+  )
+  .use(_.evalMap(m => process(m.payload) *> m.ack).compile.drain)
+```
+
+**Ack semantics:** `ack` (fire-and-forget), `ackSync` (double-ack, awaits server
+confirmation), `nak` / `nakWithDelay`, `inProgress` (resets the ack-wait timer),
+and `term` / `termWith`. Finalizing acks take effect once; `inProgress` is
+repeatable.
+
+**Reconnect:** push and pull subscriptions ride the client's automatic
+subscription replay on reconnect; the pull `consume` loop additionally re-issues
+its request on a cadence so it resumes after a dropped connection.
+
 ## Configuration
 
 ### ClientConfig
@@ -252,6 +326,7 @@ See the `examples/` directory for complete examples:
 - `Basic.scala` - Simple publish/subscribe
 - `RequestReplyExample` - Request/reply pattern
 - `QueueGroupExample` - Load-balanced workers
+- `JetStreamExample.scala` - Streams, persistent publish, and pull consumption (requires `-js`)
 
 Run examples:
 

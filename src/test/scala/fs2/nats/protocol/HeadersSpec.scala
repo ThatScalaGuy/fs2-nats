@@ -128,8 +128,9 @@ class HeadersSpec extends CatsEffectSuite:
     val result = Headers.parseWithStatus(input)
 
     assert(result.isRight)
-    val (statusCode, headers) = result.toOption.get
+    val (statusCode, statusDescription, headers) = result.toOption.get
     assertEquals(statusCode, Some(503))
+    assertEquals(statusDescription, None)
     assertEquals(headers.isEmpty, true)
   }
 
@@ -138,8 +139,9 @@ class HeadersSpec extends CatsEffectSuite:
     val result = Headers.parseWithStatus(input)
 
     assert(result.isRight)
-    val (statusCode, headers) = result.toOption.get
+    val (statusCode, statusDescription, headers) = result.toOption.get
     assertEquals(statusCode, None)
+    assertEquals(statusDescription, None)
     assertEquals(headers.get("X-Test"), Some("value"))
   }
 
@@ -148,9 +150,30 @@ class HeadersSpec extends CatsEffectSuite:
     val result = Headers.parseWithStatus(input)
 
     assert(result.isRight)
-    val (statusCode, headers) = result.toOption.get
+    val (statusCode, _, headers) = result.toOption.get
     assertEquals(statusCode, Some(404))
     assertEquals(headers.get("Description"), Some("Not Found"))
+  }
+
+  test("parseWithStatus splits code and description on the version line") {
+    val input = "NATS/1.0 100 Idle Heartbeat\r\nNats-Last-Consumer: 5\r\n\r\n"
+    val result = Headers.parseWithStatus(input)
+
+    assert(result.isRight)
+    val (statusCode, statusDescription, headers) = result.toOption.get
+    assertEquals(statusCode, Some(100))
+    assertEquals(statusDescription, Some("Idle Heartbeat"))
+    assertEquals(headers.get("Nats-Last-Consumer"), Some("5"))
+  }
+
+  test("parseWithStatus parses multi-word description (No Messages)") {
+    val input = "NATS/1.0 404 No Messages\r\n\r\n"
+    val result = Headers.parseWithStatus(input)
+
+    assert(result.isRight)
+    val (statusCode, statusDescription, _) = result.toOption.get
+    assertEquals(statusCode, Some(404))
+    assertEquals(statusDescription, Some("No Messages"))
   }
 
   test("byteLength calculation") {
