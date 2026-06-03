@@ -232,8 +232,24 @@ object SubscriptionManager:
           val msg = NatsMessage(subject, replyTo, Headers.empty, payload, sid)
           deliverMessage(sid, msg)
 
-        case NatsFrame.HMsgFrame(subject, sid, replyTo, headers, _, payload) =>
-          val msg = NatsMessage(subject, replyTo, headers, payload, sid)
+        case NatsFrame.HMsgFrame(
+              subject,
+              sid,
+              replyTo,
+              headers,
+              statusCode,
+              statusDescription,
+              payload
+            ) =>
+          val msg = NatsMessage(
+            subject,
+            replyTo,
+            headers,
+            payload,
+            sid,
+            statusCode,
+            statusDescription
+          )
           deliverMessage(sid, msg)
 
         case _ =>

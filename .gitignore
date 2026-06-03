@@ -30,3 +30,6 @@ metals.sbt
 .idea
 .idea_modules
 /.worksheet/
+
+# Internal/local notes (design docs, plans) — not for the repo
+__INTERNAL/

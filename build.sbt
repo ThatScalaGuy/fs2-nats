@@ -67,6 +67,44 @@ lazy val root = project
       ),
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.activeRef"
+      ),
+      // JetStream P1: the request/reply primitive adds `request` to the
+      // NatsClient trait and surfaces the status line code + description on
+      // HMsgFrame and NatsMessage (new fields with defaults). These are
+      // additive public-API changes that MiMa flags as binary-incompatible.
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.client.NatsClient.request"
+      ),
+      // JetStream P2: adds the `jetStream` context factory to NatsClient.
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.client.NatsClient.jetStream"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.client.NatsClient#NatsClientImpl.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.protocol.NatsFrame#HMsgFrame.apply"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.protocol.NatsFrame#HMsgFrame.copy"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.protocol.NatsFrame#HMsgFrame.this"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.protocol.NatsFrame#HMsgFrame._6"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.protocol.NatsFrame#HMsgFrame.copy$default$6"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.NatsMessage.apply"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.NatsMessage.copy"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.NatsMessage.this"
       )
     )
   )
@@ -81,7 +119,10 @@ lazy val integration = project
       "org.scalameta" %% "munit" % V.munit % Test,
       "org.typelevel" %% "munit-cats-effect" % V.munitCatsEffect % Test
     ),
-    Test / fork := true
+    Test / fork := true,
+    // Integration tests share a single NATS broker; some (reconnect) restart it,
+    // so run suites sequentially rather than in parallel.
+    Test / parallelExecution := false
   )
 
 lazy val benchmarks = project

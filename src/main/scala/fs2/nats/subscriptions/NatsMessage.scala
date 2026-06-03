@@ -32,13 +32,21 @@ import fs2.nats.protocol.Headers
   *   The message payload as raw bytes
   * @param sid
   *   The subscription ID that received this message (internal use)
+  * @param status
+  *   Optional status code from the header version line (e.g., 503 for no
+  *   responders, 404/408/409/100 for JetStream control messages)
+  * @param statusDescription
+  *   Optional status description following the code on the version line (e.g.,
+  *   "Idle Heartbeat" in "NATS/1.0 100 Idle Heartbeat")
   */
 final case class NatsMessage(
     subject: String,
     replyTo: Option[String],
     headers: Headers,
     payload: Chunk[Byte],
-    sid: Long
+    sid: Long,
+    status: Option[Int] = None,
+    statusDescription: Option[String] = None
 ):
 
   /** Get the payload as a UTF-8 string.

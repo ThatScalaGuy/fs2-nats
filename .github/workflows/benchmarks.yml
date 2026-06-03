@@ -13,6 +13,10 @@ on:
         description: "Payload size in bytes"
         required: false
         default: "16"
+      jsMessages:
+        description: "Number of messages for JetStreamBench"
+        required: false
+        default: "100000"
   pull_request:
     paths:
       - "benchmarks/**"
@@ -45,11 +49,6 @@ jobs:
     name: Run benchmarks
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    services:
-      nats:
-        image: nats:latest
-        ports:
-          - 4222:4222
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -58,6 +57,11 @@ jobs:
           java-version: "21"
           cache: sbt
       - uses: sbt/setup-sbt@v1
+
+      # Run NATS via `docker run` (not a service container) so we can pass `-js`
+      # to enable JetStream. The core ThroughputBench still works against it.
+      - name: Start NATS (JetStream enabled)
+        run: docker run -d --name nats -p 4222:4222 nats:latest -js
 
       - name: Wait for NATS
         run: |
@@ -68,11 +72,15 @@ jobs:
           echo "NATS did not become ready" >&2
           exit 1
 
-      - name: Throughput + latency
+      - name: Core throughput + latency
         run: |
           sbt -batch "benchmarks/runMain fs2.nats.benchmarks.ThroughputBench ${{ github.event.inputs.messages }} ${{ github.event.inputs.payloadBytes }}"
 
-      - name: JMH (serialization + parser)
+      - name: JetStream throughput + latency
+        run: |
+          sbt -batch "benchmarks/runMain fs2.nats.benchmarks.JetStreamBench ${{ github.event.inputs.jsMessages }} ${{ github.event.inputs.payloadBytes }}"
+
+      - name: JMH (serialization + parser + jetstream)
         run: |
           sbt -batch "benchmarks/Jmh/run -i 3 -wi 3 -f 1 -rf json -rff jmh-result.json .*Benchmark.*"
 

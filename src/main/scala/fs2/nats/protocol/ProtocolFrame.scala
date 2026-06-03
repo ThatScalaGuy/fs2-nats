@@ -69,6 +69,9 @@ object NatsFrame:
     * @param statusCode
     *   Optional status code from header version line (e.g., 503 for no
     *   responders)
+    * @param statusDescription
+    *   Optional status description following the code on the version line
+    *   (e.g., "Idle Heartbeat" in "NATS/1.0 100 Idle Heartbeat")
     * @param payload
     *   The message payload bytes
     */
@@ -78,6 +81,7 @@ object NatsFrame:
       replyTo: Option[String],
       headers: Headers,
       statusCode: Option[Int],
+      statusDescription: Option[String],
       payload: Chunk[Byte]
   ) extends NatsFrame
 

@@ -213,6 +213,7 @@ class ProtocolParserSpec extends CatsEffectSuite:
               replyTo,
               hdrs,
               statusCode,
+              _,
               pay
             ) =>
           assertEquals(subject, "FOO")
@@ -236,7 +237,7 @@ class ProtocolParserSpec extends CatsEffectSuite:
 
     parseString(data).map { frames =>
       frames.head match
-        case NatsFrame.HMsgFrame(_, _, replyTo, hdrs, _, _) =>
+        case NatsFrame.HMsgFrame(_, _, replyTo, hdrs, _, _, _) =>
           assertEquals(replyTo, Some("INBOX.X"))
           assertEquals(hdrs.get("Foo"), Some("bar"))
         case other =>
@@ -252,7 +253,7 @@ class ProtocolParserSpec extends CatsEffectSuite:
 
     parseString(data).map { frames =>
       frames.head match
-        case NatsFrame.HMsgFrame(_, _, _, _, statusCode, payload) =>
+        case NatsFrame.HMsgFrame(_, _, _, _, statusCode, _, payload) =>
           assertEquals(statusCode, Some(503))
           assertEquals(payload.size, 0)
         case other =>
@@ -269,7 +270,7 @@ class ProtocolParserSpec extends CatsEffectSuite:
 
     parseString(data).map { frames =>
       frames.head match
-        case NatsFrame.HMsgFrame(_, _, _, hdrs, _, _) =>
+        case NatsFrame.HMsgFrame(_, _, _, hdrs, _, _, _) =>
           assertEquals(hdrs.get("X-One"), Some("1"))
           assertEquals(hdrs.get("X-Two"), Some("2"))
           assertEquals(hdrs.get("X-Three"), Some("3"))
@@ -355,7 +356,7 @@ class ProtocolParserSpec extends CatsEffectSuite:
     parseChunks(chunks).map { frames =>
       assertEquals(frames.length, 1)
       frames.head match
-        case NatsFrame.HMsgFrame(_, _, _, hdrs, _, pay) =>
+        case NatsFrame.HMsgFrame(_, _, _, hdrs, _, _, pay) =>
           assertEquals(hdrs.get("X-Test"), Some("value"))
           assertEquals(new String(pay.toArray, StandardCharsets.UTF_8), "data")
         case other =>

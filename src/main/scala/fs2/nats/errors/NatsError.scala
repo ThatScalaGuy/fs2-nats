@@ -147,3 +147,42 @@ object NatsError:
         s"Maximum reconnection attempts ($attempts) exceeded",
         lastError
       )
+
+  /** No responders are available for a request. The server replied with a 503
+    * status because no subscribers are listening on the request subject.
+    *
+    * @param subject
+    *   The subject the request was sent to
+    */
+  final case class NoResponders(subject: String)
+      extends NatsError(s"No responders available for request on '$subject'")
+
+  /** A JetStream API call returned an error envelope.
+    *
+    * @param code
+    *   HTTP-like status code
+    * @param errCode
+    *   JetStream-specific numeric error code
+    * @param description
+    *   Human-readable error description from the server
+    */
+  final case class JetStreamApiError(
+      code: Int,
+      errCode: Int,
+      description: String
+  ) extends NatsError(
+        s"JetStream API error $errCode (HTTP $code): $description"
+      )
+
+  /** JetStream is not enabled on the connected server/account. */
+  case object JetStreamNotEnabled
+      extends NatsError("JetStream is not enabled on the server")
+
+  /** A JetStream publish received no acknowledgement (no stream captured the
+    * subject, or the ack was lost).
+    *
+    * @param subject
+    *   The subject that was published to
+    */
+  final case class JetStreamPublishNoAck(subject: String)
+      extends NatsError(s"No PubAck received for publish to '$subject'")
