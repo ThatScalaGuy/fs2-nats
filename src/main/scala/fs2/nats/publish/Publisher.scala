@@ -17,7 +17,6 @@
 package fs2.nats.publish
 
 import cats.effect.Async
-import cats.syntax.all.*
 import fs2.Chunk
 import fs2.nats.errors.NatsError
 import fs2.nats.protocol.Headers
@@ -99,27 +98,35 @@ object Publisher:
       transport: Transport[F],
       initialMaxPayload: Long = 1024 * 1024
   ): F[Publisher[F]] =
-    cats.effect.Ref.of[F, Long](initialMaxPayload).map { maxPayloadRef =>
-      new PublisherImpl[F](transport, maxPayloadRef)
-    }
+    Async[F].delay(new PublisherImpl[F](transport, initialMaxPayload))
 
   private class PublisherImpl[F[_]: Async](
       transport: Transport[F],
-      maxPayloadRef: cats.effect.Ref[F, Long]
+      initialMaxPayload: Long
   ) extends Publisher[F]:
+
+    // Read once per publish as a plain volatile field instead of a Ref effect;
+    // refreshed when server INFO arrives.
+    @volatile private var maxPayload: Long = initialMaxPayload
 
     override def publish(
         subject: String,
         payload: Chunk[Byte],
         replyTo: Option[String]
     ): F[Unit] =
-      for
-        _ <- validateSubject(subject)
-        maxPayload <- maxPayloadRef.get
-        _ <- validatePayloadSize(payload.size.toLong, maxPayload)
-        bytes = SerializationUtils.buildPub(subject, replyTo, payload)
-        _ <- transport.send(bytes)
-      yield ()
+      Async[F].defer {
+        SerializationUtils.validateSubject(subject) match
+          case Left(reason) =>
+            Async[F].raiseError(NatsError.InvalidSubject(subject, reason))
+          case Right(_) =>
+            val size = payload.size.toLong
+            if size > maxPayload then
+              Async[F].raiseError(NatsError.PayloadTooLarge(size, maxPayload))
+            else
+              transport.send(
+                SerializationUtils.buildPub(subject, replyTo, payload)
+              )
+      }
 
     override def publishWithHeaders(
         subject: String,
@@ -127,31 +134,23 @@ object Publisher:
         headers: Headers,
         replyTo: Option[String]
     ): F[Unit] =
-      for
-        _ <- validateSubject(subject)
-        headerBytes = headers.toBytes
-        totalSize = headerBytes.size.toLong + payload.size.toLong
-        maxPayload <- maxPayloadRef.get
-        _ <- validatePayloadSize(totalSize, maxPayload)
-        bytes = SerializationUtils.buildHPub(
-          subject,
-          replyTo,
-          headerBytes,
-          payload
-        )
-        _ <- transport.send(bytes)
-      yield ()
+      Async[F].defer {
+        SerializationUtils.validateSubject(subject) match
+          case Left(reason) =>
+            Async[F].raiseError(NatsError.InvalidSubject(subject, reason))
+          case Right(_) =>
+            val headerBytes = headers.toBytes
+            val totalSize = headerBytes.size.toLong + payload.size.toLong
+            if totalSize > maxPayload then
+              Async[F].raiseError(
+                NatsError.PayloadTooLarge(totalSize, maxPayload)
+              )
+            else
+              transport.send(
+                SerializationUtils
+                  .buildHPub(subject, replyTo, headerBytes, payload)
+              )
+      }
 
     override def updateMaxPayload(maxPayload: Long): F[Unit] =
-      maxPayloadRef.set(maxPayload)
-
-    private def validateSubject(subject: String): F[Unit] =
-      SerializationUtils.validateSubject(subject) match
-        case Right(_)     => Async[F].unit
-        case Left(reason) =>
-          Async[F].raiseError(NatsError.InvalidSubject(subject, reason))
-
-    private def validatePayloadSize(size: Long, maxPayload: Long): F[Unit] =
-      if size > maxPayload then
-        Async[F].raiseError(NatsError.PayloadTooLarge(size, maxPayload))
-      else Async[F].unit
+      Async[F].delay { this.maxPayload = maxPayload }

@@ -166,13 +166,18 @@ object SubscriptionManager:
       onUnsubscribe
     )
 
+  /** Per-subscription hot state, read once per delivered message. `remaining` <
+    * 0 means unlimited (no auto-unsubscribe count); a non-negative value counts
+    * down toward auto-unsubscribe.
+    */
+  private final class SubState(val active: Boolean, val remaining: Int)
+
   private class InternalSubscription[F[_]](
       val sid: Long,
       val subject: String,
       val queueGroup: Option[String],
       val queue: Queue[F, Option[NatsMessage]],
-      val remainingRef: Ref[F, Option[Int]],
-      val activeRef: Ref[F, Boolean]
+      val stateRef: Ref[F, SubState]
   )
 
   private class SubscriptionManagerImpl[F[_]: Async](
@@ -190,15 +195,13 @@ object SubscriptionManager:
     ): F[(Stream[F, NatsMessage], SubscriptionHandle[F])] =
       for
         queue <- Queue.bounded[F, Option[NatsMessage]](queueCapacity)
-        remainingRef <- Ref.of[F, Option[Int]](None)
-        activeRef <- Ref.of[F, Boolean](true)
+        stateRef <- Ref.of[F, SubState](new SubState(true, -1))
         sub = new InternalSubscription[F](
           sid,
           subject,
           queueGroup,
           queue,
-          remainingRef,
-          activeRef
+          stateRef
         )
         _ <- subsRef.update(_ + (sid -> sub))
       yield
@@ -207,7 +210,7 @@ object SubscriptionManager:
           sid,
           subject,
           queueGroup,
-          activeRef,
+          stateRef,
           onUnsubscribe,
           this
         )
@@ -238,18 +241,23 @@ object SubscriptionManager:
             Async[F].pure(None)
 
           case Some(sub) =>
-            sub.activeRef.get.flatMap { active =>
-              if !active then Async[F].pure(None)
+            sub.stateRef.get.flatMap { state =>
+              if !state.active then Async[F].pure(None)
+              else if state.remaining < 0 then
+                // Unlimited subscription (the common case): deliver with a single
+                // state read, no compare-and-set.
+                tryEnqueue(sub, msg)
               else
-                sub.remainingRef
-                  .modify {
-                    case Some(n) if n > 0 => (Some(n - 1), true)
-                    case Some(_) => (Some(0), false) // Covers 0 and negative
-                    case None    => (None, true)
+                sub.stateRef
+                  .modify { cur =>
+                    if !cur.active then (cur, false)
+                    else if cur.remaining > 0 then
+                      (new SubState(true, cur.remaining - 1), true)
+                    else (new SubState(false, 0), false)
                   }
                   .flatMap { shouldDeliver =>
                     if !shouldDeliver then
-                      sub.activeRef.set(false) *>
+                      sub.stateRef.set(new SubState(false, 0)) *>
                         sub.queue.offer(None) *>
                         sidAllocator.release(sid) *>
                         subsRef.update(_ - sid) *>
@@ -300,8 +308,8 @@ object SubscriptionManager:
       subsRef.get.flatMap { subs =>
         subs.toList
           .traverse { case (sid, sub) =>
-            sub.activeRef.get.map { active =>
-              if active then Some((sid, sub.subject, sub.queueGroup))
+            sub.stateRef.get.map { state =>
+              if state.active then Some((sid, sub.subject, sub.queueGroup))
               else None
             }
           }
@@ -313,7 +321,7 @@ object SubscriptionManager:
         subs.get(sid) match
           case None      => Async[F].unit
           case Some(sub) =>
-            sub.activeRef.set(false) *>
+            sub.stateRef.set(new SubState(false, 0)) *>
               sub.queue.offer(None) *>
               sidAllocator.release(sid) *>
               subsRef.update(_ - sid)
@@ -322,7 +330,7 @@ object SubscriptionManager:
     override def closeAll: F[Unit] =
       subsRef.get.flatMap { subs =>
         subs.values.toList.traverse_ { sub =>
-          sub.activeRef.set(false) *>
+          sub.stateRef.set(new SubState(false, 0)) *>
             sub.queue.offer(None) *>
             sidAllocator.release(sub.sid)
         }
@@ -332,14 +340,14 @@ object SubscriptionManager:
       val sid: Long,
       val subject: String,
       val queueGroup: Option[String],
-      activeRef: Ref[F, Boolean],
+      stateRef: Ref[F, SubState],
       onUnsubscribe: (Long, Option[Int]) => F[Unit],
       manager: SubscriptionManager[F]
   ) extends SubscriptionHandle[F]:
 
     override def unsubscribe: F[Unit] =
-      activeRef.get.flatMap { active =>
-        if active then
+      stateRef.get.flatMap { state =>
+        if state.active then
           onUnsubscribe(sid, None) *>
             manager.remove(sid)
         else Async[F].unit
