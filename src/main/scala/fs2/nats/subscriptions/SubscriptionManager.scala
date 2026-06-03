@@ -172,9 +172,9 @@ object SubscriptionManager:
     */
   private final class SubState(val active: Boolean, val remaining: Int)
 
-  /** Sentinel enqueued to terminate a subscription stream. Compared by reference
-    * identity (`ne`), so delivered messages need not be boxed in an Option just
-    * to carry an out-of-band end-of-stream signal.
+  /** Sentinel enqueued to terminate a subscription stream. Compared by
+    * reference identity (`ne`), so delivered messages need not be boxed in an
+    * Option just to carry an out-of-band end-of-stream signal.
     */
   private val PoisonPill: NatsMessage =
     NatsMessage("", None, Headers.empty, Chunk.empty, -1L)

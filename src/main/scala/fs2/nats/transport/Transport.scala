@@ -67,12 +67,13 @@ trait Transport[F[_]]:
 object Transport:
 
   /** Concatenate a batch of queued byte chunks into a single array-backed Chunk
-    * so the whole batch can be flushed to the socket in one write (one syscall).
+    * so the whole batch can be flushed to the socket in one write (one
+    * syscall).
     *
-    * The writer drains all immediately-available frames as one batch; coalescing
-    * them here is what turns "one write per message" into "one write per drain
-    * cycle". A single-element batch (the common low-load case) is returned as-is,
-    * avoiding any copy.
+    * The writer drains all immediately-available frames as one batch;
+    * coalescing them here is what turns "one write per message" into "one write
+    * per drain cycle". A single-element batch (the common low-load case) is
+    * returned as-is, avoiding any copy.
     *
     * @param batch
     *   The frames dequeued together, each a complete protocol message

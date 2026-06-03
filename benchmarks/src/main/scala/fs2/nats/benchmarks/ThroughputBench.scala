@@ -25,11 +25,12 @@ import scala.concurrent.duration.*
 
 /** End-to-end throughput and latency harness against a live NATS server.
   *
-  * Exercises the full publish path (serialize -> enqueue -> coalesced write) and
-  * receive path (parse -> route -> deliver) over a real socket, using the
+  * Exercises the full publish path (serialize -> enqueue -> coalesced write)
+  * and receive path (parse -> route -> deliver) over a real socket, using the
   * server's echo so a single connection both publishes and consumes.
   *
-  * Prerequisites: a NATS server on the target host (e.g. `docker compose up -d`).
+  * Prerequisites: a NATS server on the target host (e.g.
+  * `docker compose up -d`).
   *
   * Run:
   * {{{
@@ -67,7 +68,8 @@ object ThroughputBench extends IOApp:
       yield ExitCode.Success
     }
 
-  /** Publish k messages while concurrently consuming k, timing the whole round. */
+  /** Publish k messages while concurrently consuming k, timing the whole round.
+    */
   private def runRound(
       client: NatsClient[IO],
       stream: Stream[IO, ?],
@@ -117,14 +119,15 @@ object ThroughputBench extends IOApp:
         _ <- IO.println("  latency warmup...")
         _ <- roundTrip(client, stream, subject, payload).replicateA_(200)
         _ <- IO.println(s"  latency measure ($iterations round-trips)...")
-        samples <- (0 until iterations).toVector.traverse(_ =>
-          roundTrip(client, stream, subject, payload)
-        )
+        samples <- (0 until iterations).toVector
+          .traverse(_ => roundTrip(client, stream, subject, payload))
         _ <- reportLatency(samples)
       yield ()
     }
 
-  /** One synchronous publish -> receive round trip, returning the elapsed nanos. */
+  /** One synchronous publish -> receive round trip, returning the elapsed
+    * nanos.
+    */
   private def roundTrip(
       client: NatsClient[IO],
       stream: Stream[IO, ?],

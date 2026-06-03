@@ -28,7 +28,8 @@ object SerializationUtils:
 
   private val CRLF: Array[Byte] = "\r\n".getBytes(StandardCharsets.US_ASCII)
 
-  private val PubPrefix: Array[Byte] = "PUB ".getBytes(StandardCharsets.US_ASCII)
+  private val PubPrefix: Array[Byte] =
+    "PUB ".getBytes(StandardCharsets.US_ASCII)
   private val HpubPrefix: Array[Byte] =
     "HPUB ".getBytes(StandardCharsets.US_ASCII)
   private val Space: Byte = ' '.toByte

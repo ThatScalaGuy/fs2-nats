@@ -423,7 +423,8 @@ object ProtocolParser:
     b == ' '.toByte || b == '\t'.toByte
 
   /** Decode the full control line as a UTF-8 String. Used only for the
-    * infrequent INFO and -ERR frames; MSG/HMSG never materialize the whole line.
+    * infrequent INFO and -ERR frames; MSG/HMSG never materialize the whole
+    * line.
     */
   private def decodeLine(chunk: Chunk[Byte]): String =
     val sl = chunk.toArraySlice[Byte]
