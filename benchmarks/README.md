@@ -59,6 +59,22 @@ sbt "benchmarks/runMain fs2.nats.benchmarks.ThroughputBench 500000 16"   # optim
 (The `benchmarks` project lives only on this branch, so for the baseline run
 either cherry-pick this directory onto `main` or copy it across worktrees.)
 
+## Example results (main vs `perf/write-coalescing`)
+
+Back-to-back on one dev machine (200,000 × 16 B, loopback echo). Absolute numbers
+vary by machine and load — the **ratio** is the point.
+
+| Metric | Baseline (`main`) | Optimized | Change |
+|---|---|---|---|
+| Throughput | 74,161 msgs/s | 287,686 msgs/s | **~3.9× faster** |
+| `buildPub` alloc (16 B) | 464 B/op | 136 B/op | **~3.4× less** |
+| `buildPub` speed (16 B) | 22.9 ops/µs | 30.7 ops/µs | ~1.34× |
+| Round-trip latency p50 | 217 µs | 217 µs | neutral |
+
+Throughput is the headline (write coalescing — fewer syscalls under load).
+Round-trip latency is ~neutral: the latency test sends one message at a time, so
+there is nothing to coalesce; the win shows up only under sustained load.
+
 ## Syscall count (proves write coalescing)
 
 The headline Tier 1 win is **one `write` per drain cycle instead of per message**.
