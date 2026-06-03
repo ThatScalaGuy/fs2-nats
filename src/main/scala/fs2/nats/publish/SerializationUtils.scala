@@ -35,6 +35,13 @@ object SerializationUtils:
   private val Cr: Byte = '\r'.toByte
   private val Lf: Byte = '\n'.toByte
 
+  // Static control frames never change, so build them once and share the
+  // immutable Chunk. PONG in particular is sent on every server PING.
+  private val PingChunk: Chunk[Byte] =
+    Chunk.array("PING\r\n".getBytes(StandardCharsets.US_ASCII))
+  private val PongChunk: Chunk[Byte] =
+    Chunk.array("PONG\r\n".getBytes(StandardCharsets.US_ASCII))
+
   /** Convert a string to UTF-8 bytes.
     *
     * @param s
@@ -265,16 +272,14 @@ object SerializationUtils:
     * @return
     *   Complete PING command as bytes
     */
-  def buildPing: Chunk[Byte] =
-    withCrlf("PING")
+  def buildPing: Chunk[Byte] = PingChunk
 
   /** Build a PONG command.
     *
     * @return
     *   Complete PONG command as bytes
     */
-  def buildPong: Chunk[Byte] =
-    withCrlf("PONG")
+  def buildPong: Chunk[Byte] = PongChunk
 
   /** Calculate the byte length of a string when encoded as UTF-8.
     *

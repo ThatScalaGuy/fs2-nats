@@ -19,7 +19,7 @@ package fs2.nats.subscriptions
 import cats.effect.{Async, Ref}
 import cats.effect.std.Queue
 import cats.syntax.all.*
-import fs2.Stream
+import fs2.{Chunk, Stream}
 import fs2.nats.client.{ClientEvent, SlowConsumerPolicy}
 import fs2.nats.protocol.{Headers, NatsFrame}
 
@@ -172,11 +172,18 @@ object SubscriptionManager:
     */
   private final class SubState(val active: Boolean, val remaining: Int)
 
+  /** Sentinel enqueued to terminate a subscription stream. Compared by reference
+    * identity (`ne`), so delivered messages need not be boxed in an Option just
+    * to carry an out-of-band end-of-stream signal.
+    */
+  private val PoisonPill: NatsMessage =
+    NatsMessage("", None, Headers.empty, Chunk.empty, -1L)
+
   private class InternalSubscription[F[_]](
       val sid: Long,
       val subject: String,
       val queueGroup: Option[String],
-      val queue: Queue[F, Option[NatsMessage]],
+      val queue: Queue[F, NatsMessage],
       val stateRef: Ref[F, SubState]
   )
 
@@ -194,7 +201,7 @@ object SubscriptionManager:
         queueGroup: Option[String]
     ): F[(Stream[F, NatsMessage], SubscriptionHandle[F])] =
       for
-        queue <- Queue.bounded[F, Option[NatsMessage]](queueCapacity)
+        queue <- Queue.bounded[F, NatsMessage](queueCapacity)
         stateRef <- Ref.of[F, SubState](new SubState(true, -1))
         sub = new InternalSubscription[F](
           sid,
@@ -205,7 +212,8 @@ object SubscriptionManager:
         )
         _ <- subsRef.update(_ + (sid -> sub))
       yield
-        val stream = Stream.fromQueueNoneTerminated(queue)
+        val stream =
+          Stream.fromQueueUnterminated(queue).takeWhile(_ ne PoisonPill)
         val handle = new SubscriptionHandleImpl[F](
           sid,
           subject,
@@ -258,7 +266,7 @@ object SubscriptionManager:
                   .flatMap { shouldDeliver =>
                     if !shouldDeliver then
                       sub.stateRef.set(new SubState(false, 0)) *>
-                        sub.queue.offer(None) *>
+                        sub.queue.offer(PoisonPill) *>
                         sidAllocator.release(sid) *>
                         subsRef.update(_ - sid) *>
                         Async[F].pure(None)
@@ -273,10 +281,10 @@ object SubscriptionManager:
     ): F[Option[ClientEvent.SlowConsumer]] =
       policy match
         case SlowConsumerPolicy.Block =>
-          sub.queue.offer(Some(msg)).as(None)
+          sub.queue.offer(msg).as(None)
 
         case SlowConsumerPolicy.DropNew =>
-          sub.queue.tryOffer(Some(msg)).flatMap {
+          sub.queue.tryOffer(msg).flatMap {
             case true  => Async[F].pure(None)
             case false =>
               Async[F].pure(
@@ -285,18 +293,18 @@ object SubscriptionManager:
           }
 
         case SlowConsumerPolicy.DropOldest =>
-          sub.queue.tryOffer(Some(msg)).flatMap {
+          sub.queue.tryOffer(msg).flatMap {
             case true  => Async[F].pure(None)
             case false =>
               sub.queue.tryTake *>
-                sub.queue.tryOffer(Some(msg)) *>
+                sub.queue.tryOffer(msg) *>
                 Async[F].pure(
                   Some(ClientEvent.SlowConsumer(sub.sid, sub.subject, 1))
                 )
           }
 
         case SlowConsumerPolicy.ErrorAndDrop =>
-          sub.queue.tryOffer(Some(msg)).flatMap {
+          sub.queue.tryOffer(msg).flatMap {
             case true  => Async[F].pure(None)
             case false =>
               Async[F].pure(
@@ -322,7 +330,7 @@ object SubscriptionManager:
           case None      => Async[F].unit
           case Some(sub) =>
             sub.stateRef.set(new SubState(false, 0)) *>
-              sub.queue.offer(None) *>
+              sub.queue.offer(PoisonPill) *>
               sidAllocator.release(sid) *>
               subsRef.update(_ - sid)
       }
@@ -331,7 +339,7 @@ object SubscriptionManager:
       subsRef.get.flatMap { subs =>
         subs.values.toList.traverse_ { sub =>
           sub.stateRef.set(new SubState(false, 0)) *>
-            sub.queue.offer(None) *>
+            sub.queue.offer(PoisonPill) *>
             sidAllocator.release(sub.sid)
         }
       } *> subsRef.set(Map.empty)
