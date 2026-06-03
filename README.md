@@ -233,6 +233,18 @@ sbt integration/test
 docker-compose down
 ```
 
+### Pre-push hook (optional)
+
+A `.githooks/pre-push` hook runs the same gate CI enforces (`githubWorkflowCheck`,
+`scalafmtCheckAll`/`headerCheckAll`, `test`, `mimaReportBinaryIssues`, `doc`).
+Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Bypass a single push with `SKIP_PREPUSH=1 git push`.
+
 ## Examples
 
 See the `examples/` directory for complete examples:
