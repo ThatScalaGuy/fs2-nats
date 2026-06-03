@@ -63,3 +63,36 @@ trait Transport[F[_]]:
     *   True if connected and operational
     */
   def isConnected: F[Boolean]
+
+object Transport:
+
+  /** Concatenate a batch of queued byte chunks into a single array-backed Chunk
+    * so the whole batch can be flushed to the socket in one write (one syscall).
+    *
+    * The writer drains all immediately-available frames as one batch; coalescing
+    * them here is what turns "one write per message" into "one write per drain
+    * cycle". A single-element batch (the common low-load case) is returned as-is,
+    * avoiding any copy.
+    *
+    * @param batch
+    *   The frames dequeued together, each a complete protocol message
+    * @return
+    *   A single contiguous Chunk containing every frame in order
+    */
+  private[transport] def coalesce(batch: Chunk[Chunk[Byte]]): Chunk[Byte] =
+    if batch.size == 1 then batch(0)
+    else
+      var total = 0
+      var i = 0
+      while i < batch.size do
+        total += batch(i).size
+        i += 1
+      val arr = new Array[Byte](total)
+      var off = 0
+      i = 0
+      while i < batch.size do
+        val c = batch(i)
+        c.copyToArray(arr, off)
+        off += c.size
+        i += 1
+      Chunk.array(arr)

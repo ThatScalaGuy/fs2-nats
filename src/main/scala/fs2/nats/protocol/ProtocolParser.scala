@@ -406,10 +406,16 @@ object ProtocolParser:
     else Pull.output1(NatsFrame.ParseErrorFrame(message)) >> Pull.done
 
   private def findCrlf(chunk: Chunk[Byte]): Option[Int] =
-    val arr = chunk.toArray
-    var i = 0
-    while i < arr.length - 1 do
-      if arr(i) == CR && arr(i + 1) == LF then return Some(i)
+    // Scan in place over the chunk's backing array. For the common ArraySlice
+    // case toArraySlice returns the chunk itself (zero-copy), so we no longer
+    // re-materialize the whole unconsumed buffer on every control-line scan.
+    val sl = chunk.toArraySlice[Byte]
+    val values = sl.values
+    val base = sl.offset
+    val limit = base + sl.length - 1
+    var i = base
+    while i < limit do
+      if values(i) == CR && values(i + 1) == LF then return Some(i - base)
       i += 1
     None
 
