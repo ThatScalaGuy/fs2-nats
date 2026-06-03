@@ -102,9 +102,10 @@ object TlsTransport:
   ): Resource[F, Unit] =
     val writerFiber = Stream
       .fromQueueNoneTerminated(writeQueue)
-      .foreach(chunk =>
+      .chunks
+      .foreach(batch =>
         Async[F].timeoutTo(
-          socket.write(chunk),
+          socket.write(Transport.coalesce(batch)),
           config.writeTimeout,
           Async[F].raiseError(
             fs2.nats.errors.NatsError.ConnectionFailed("Write timed out")

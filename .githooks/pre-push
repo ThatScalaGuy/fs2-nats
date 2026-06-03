@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# Pre-push gate mirroring the sbt-typelevel CI build job, so the checks that have
+# bitten this PR (githubWorkflowCheck drift, scalafmt, MiMa) — plus test/doc —
+# fail locally instead of in CI.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+# Bypass once:            SKIP_PREPUSH=1 git push
+#
+set -euo pipefail
+
+if [ "${SKIP_PREPUSH:-0}" = "1" ]; then
+  echo "pre-push: skipped (SKIP_PREPUSH=1)"
+  exit 0
+fi
+
+if ! command -v sbt >/dev/null 2>&1; then
+  echo "pre-push: sbt not found on PATH — skipping gate" >&2
+  exit 0
+fi
+
+echo "pre-push: running CI gate (bypass with SKIP_PREPUSH=1)..."
+sbt -batch \
+  githubWorkflowCheck \
+  "++ 3" \
+  headerCheckAll scalafmtCheckAll scalafmtSbtCheck \
+  test \
+  mimaReportBinaryIssues \
+  doc
+
+echo "pre-push: CI gate passed"

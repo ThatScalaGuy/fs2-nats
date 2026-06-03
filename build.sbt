@@ -1,3 +1,5 @@
+import com.typesafe.tools.mima.core.*
+
 lazy val V = new {
   val scala3 = "3.3.7"
   val catsEffect = "3.6.3"
@@ -49,7 +51,24 @@ lazy val root = project
       "org.scalameta" %% "munit-scalacheck" % V.munitScalaCheck % Test
     ),
     Test / fork := true,
-    Test / parallelExecution := false
+    Test / parallelExecution := false,
+    // The Tier 2/3 performance refactor changed the signatures of object-private
+    // implementation classes. These are not part of the public API; MiMa only
+    // sees them because Scala emits nested private classes as separate classfiles.
+    mimaBinaryIssueFilters ++= Seq(
+      ProblemFilters.exclude[IncompatibleMethTypeProblem](
+        "fs2.nats.publish.Publisher#PublisherImpl.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.remainingRef"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.activeRef"
+      )
+    )
   )
 
 lazy val integration = project
@@ -63,4 +82,18 @@ lazy val integration = project
       "org.typelevel" %% "munit-cats-effect" % V.munitCatsEffect % Test
     ),
     Test / fork := true
+  )
+
+lazy val benchmarks = project
+  .in(file("benchmarks"))
+  .dependsOn(root)
+  .enablePlugins(JmhPlugin, NoPublishPlugin)
+  .settings(
+    name := "fs2-nats-benchmarks",
+    scalaVersion := V.scala3,
+    // JMH generates Java sources compiled with an obsolete --release 8; under CI
+    // sbt-typelevel turns warnings into errors. This is a NoPublish dev tool, so
+    // don't fail its build on those warnings.
+    tlFatalWarnings := false,
+    Compile / javacOptions ~= (_.filterNot(_ == "-Werror"))
   )

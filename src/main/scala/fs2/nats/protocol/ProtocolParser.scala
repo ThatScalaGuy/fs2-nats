@@ -126,12 +126,11 @@ object ProtocolParser:
       remaining: Chunk[Byte],
       input: Stream[F, Byte]
   ): Pull[F, NatsFrame, Unit] =
-    val line = new String(controlLine.toArray, StandardCharsets.UTF_8)
-    val tokens = tokenize(line)
+    val tokens = tokenize(controlLine)
 
     tokens.headOption.map(_.toUpperCase) match
       case Some("INFO") =>
-        parseInfoFrame(config, line, remaining, input)
+        parseInfoFrame(config, decodeLine(controlLine), remaining, input)
 
       case Some("MSG") =>
         parseMsgFrame(config, tokens, remaining, input)
@@ -149,7 +148,8 @@ object ProtocolParser:
         Pull.output1(NatsFrame.OkFrame) >> parseLoop(config, remaining, input)
 
       case Some("-ERR") =>
-        val msg = line.drop(4).trim.stripPrefix("'").stripSuffix("'")
+        val msg =
+          decodeLine(controlLine).drop(4).trim.stripPrefix("'").stripSuffix("'")
         Pull.output1(NatsFrame.ErrFrame(msg)) >> parseLoop(
           config,
           remaining,
@@ -406,15 +406,52 @@ object ProtocolParser:
     else Pull.output1(NatsFrame.ParseErrorFrame(message)) >> Pull.done
 
   private def findCrlf(chunk: Chunk[Byte]): Option[Int] =
-    val arr = chunk.toArray
-    var i = 0
-    while i < arr.length - 1 do
-      if arr(i) == CR && arr(i + 1) == LF then return Some(i)
+    // Scan in place over the chunk's backing array. For the common ArraySlice
+    // case toArraySlice returns the chunk itself (zero-copy), so we no longer
+    // re-materialize the whole unconsumed buffer on every control-line scan.
+    val sl = chunk.toArraySlice[Byte]
+    val values = sl.values
+    val base = sl.offset
+    val limit = base + sl.length - 1
+    var i = base
+    while i < limit do
+      if values(i) == CR && values(i + 1) == LF then return Some(i - base)
       i += 1
     None
 
-  private def tokenize(line: String): Vector[String] =
-    line.split("\\s+").toVector.filter(_.nonEmpty)
+  private def isSpace(b: Byte): Boolean =
+    b == ' '.toByte || b == '\t'.toByte
+
+  /** Decode the full control line as a UTF-8 String. Used only for the
+    * infrequent INFO and -ERR frames; MSG/HMSG never materialize the whole
+    * line.
+    */
+  private def decodeLine(chunk: Chunk[Byte]): String =
+    val sl = chunk.toArraySlice[Byte]
+    new String(sl.values, sl.offset, sl.length, StandardCharsets.UTF_8)
+
+  /** Split a control line into whitespace-delimited tokens at the byte level,
+    * avoiding the regex split and the whole-line String allocation of the old
+    * path on the MSG/HMSG receive hot path.
+    */
+  private def tokenize(chunk: Chunk[Byte]): Vector[String] =
+    val sl = chunk.toArraySlice[Byte]
+    val arr = sl.values
+    val end = sl.offset + sl.length
+    val builder = Vector.newBuilder[String]
+    var i = sl.offset
+    while i < end do
+      while i < end && isSpace(arr(i)) do i += 1
+      if i < end then
+        val tokenStart = i
+        while i < end && !isSpace(arr(i)) do i += 1
+        builder += new String(
+          arr,
+          tokenStart,
+          i - tokenStart,
+          StandardCharsets.UTF_8
+        )
+    builder.result()
 
   private def parseInt(s: String): Option[Int] =
     try Some(s.toInt)
