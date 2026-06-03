@@ -1,3 +1,5 @@
+import com.typesafe.tools.mima.core.*
+
 lazy val V = new {
   val scala3 = "3.3.7"
   val catsEffect = "3.6.3"
@@ -49,7 +51,24 @@ lazy val root = project
       "org.scalameta" %% "munit-scalacheck" % V.munitScalaCheck % Test
     ),
     Test / fork := true,
-    Test / parallelExecution := false
+    Test / parallelExecution := false,
+    // The Tier 2/3 performance refactor changed the signatures of object-private
+    // implementation classes. These are not part of the public API; MiMa only
+    // sees them because Scala emits nested private classes as separate classfiles.
+    mimaBinaryIssueFilters ++= Seq(
+      ProblemFilters.exclude[IncompatibleMethTypeProblem](
+        "fs2.nats.publish.Publisher#PublisherImpl.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.remainingRef"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.activeRef"
+      )
+    )
   )
 
 lazy val integration = project
