@@ -90,5 +90,10 @@ lazy val benchmarks = project
   .enablePlugins(JmhPlugin, NoPublishPlugin)
   .settings(
     name := "fs2-nats-benchmarks",
-    scalaVersion := V.scala3
+    scalaVersion := V.scala3,
+    // JMH generates Java sources compiled with an obsolete --release 8; under CI
+    // sbt-typelevel turns warnings into errors. This is a NoPublish dev tool, so
+    // don't fail its build on those warnings.
+    tlFatalWarnings := false,
+    Compile / javacOptions ~= (_.filterNot(_ == "-Werror"))
   )
