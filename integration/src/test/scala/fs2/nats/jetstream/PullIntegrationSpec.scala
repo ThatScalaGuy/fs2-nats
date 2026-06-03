@@ -134,6 +134,21 @@ class PullIntegrationSpec extends CatsEffectSuite:
     }
   }
 
+  test("once-guard: a second finalizing ack is a no-op (ack then nak)") {
+    val name = uniqueName
+    withPullConsumer(name) { (js, c) =>
+      for
+        _ <- publishN(js, s"$name.a", 1)
+        first <- c.fetch(1, 2.seconds)
+        // ack finalizes; the subsequent nak must be ignored (no redelivery).
+        _ <- first.traverse_(m => m.ack *> m.nak)
+        again <- c.fetchNoWait(5)
+      yield
+        assertEquals(first.size, 1)
+        assertEquals(again.size, 0)
+    }
+  }
+
   test("consume drains a continuous stream") {
     val name = uniqueName
     withPullConsumer(name) { (js, c) =>

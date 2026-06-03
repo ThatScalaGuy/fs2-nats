@@ -93,48 +93,90 @@ private[jetstream] object AckBytes:
 
 /** Parser for the `$JS.ACK` reply-subject metadata.
   *
-  * Two on-wire formats are normalized to shared indices: V1 (9 tokens, no
-  * domain/account) has two empty tokens inserted at positions 2-3; V2 (>=11
-  * tokens; the server sends 12) already carries domain + account + a trailing
-  * random token. A token count of 10 or fewer than 9 is malformed.
+  * Two on-wire formats share indices via an offset: V1 (9 tokens, no
+  * domain/account) shifts the post-prefix fields left by two; V2 (>=11 tokens;
+  * the server sends 12) carries domain + account + a trailing random token. A
+  * token count of 10 or fewer than 9 is malformed.
+  *
+  * Hot path (runs per consumed message): a single delimiter scan records dot
+  * positions, numeric fields are parsed directly from character ranges, and
+  * only the stream/consumer/domain strings are materialized — avoiding the full
+  * `split` (a substring per token) and the V1 normalization copy.
   */
 private[jetstream] object JsAckParser:
 
+  private val Prefix = "$JS.ACK."
+
   def parse(reply: String): Either[String, JsMetadata] =
-    val raw = reply.split("\\.", -1)
-    if raw.length < 2 || raw(0) != "$JS" || raw(1) != "ACK" then
+    val len = reply.length
+    if !reply.startsWith(Prefix) then
       Left(s"Not a JetStream ACK subject: '$reply'")
     else
-      val tokens =
-        if raw.length == 9 then Some(raw.patch(2, Array("", ""), 0))
-        else if raw.length >= 11 then Some(raw)
-        else None
-      tokens match
-        case None =>
-          Left(
-            s"Malformed JetStream ACK subject ('$reply'): ${raw.length} tokens"
-          )
-        case Some(t) =>
-          for
-            numDelivered <- parseLong(t(6), "num_delivered", reply)
-            streamSeq <- parseLong(t(7), "stream_seq", reply)
-            consumerSeq <- parseLong(t(8), "consumer_seq", reply)
-            tsNanos <- parseLong(t(9), "timestamp", reply)
-            numPending <- parseLong(t(10), "num_pending", reply)
-          yield JsMetadata(
-            stream = t(4),
-            consumer = t(5),
+      var nDots = 0
+      var i = 0
+      while i < len do
+        if reply.charAt(i) == '.' then nDots += 1
+        i += 1
+      val tokenCount = nDots + 1
+      if tokenCount != 9 && tokenCount < 11 then
+        Left(s"Malformed JetStream ACK subject ('$reply'): $tokenCount tokens")
+      else
+        // V1 fields sit two indices earlier than V2 (no domain/account).
+        val off = if tokenCount == 9 then -2 else 0
+        val dots = new Array[Int](nDots)
+        var k = 0
+        var j = 0
+        while j < len do
+          if reply.charAt(j) == '.' then
+            dots(k) = j
+            k += 1
+          j += 1
+
+        def tStart(t: Int): Int = if t == 0 then 0 else dots(t - 1) + 1
+        def tEnd(t: Int): Int = if t == nDots then len else dots(t)
+        def num(field: String, t: Int): Either[String, Long] =
+          parseULong(reply, tStart(t + off), tEnd(t + off))
+            .toRight(s"Invalid $field in ACK subject '$reply'")
+
+        for
+          numDelivered <- num("num_delivered", 6)
+          streamSeq <- num("stream_seq", 7)
+          consumerSeq <- num("consumer_seq", 8)
+          tsNanos <- num("timestamp", 9)
+          numPending <- num("num_pending", 10)
+        yield
+          val domain =
+            if off != 0 then None
+            else
+              val s = tStart(2)
+              val e = tEnd(2)
+              if e <= s || (e - s == 1 && reply.charAt(s) == '_') then None
+              else Some(reply.substring(s, e))
+          JsMetadata(
+            stream = reply.substring(tStart(4 + off), tEnd(4 + off)),
+            consumer = reply.substring(tStart(5 + off), tEnd(5 + off)),
             streamSeq = streamSeq,
             consumerSeq = consumerSeq,
             numDelivered = numDelivered,
             numPending = numPending,
             timestamp = Instant.ofEpochSecond(0L, tsNanos),
-            domain = Option(t(2)).filter(d => d.nonEmpty && d != "_")
+            domain = domain
           )
 
-  private def parseLong(
-      s: String,
-      field: String,
-      reply: String
-  ): Either[String, Long] =
-    s.toLongOption.toRight(s"Invalid $field in ACK subject '$reply': '$s'")
+  /** Parse a non-negative decimal `Long` from `s[from until)` without
+    * allocating an intermediate substring. Returns `None` on a non-digit or
+    * empty range.
+    */
+  private def parseULong(s: String, from: Int, until: Int): Option[Long] =
+    if from >= until then None
+    else
+      var v = 0L
+      var i = from
+      var ok = true
+      while ok && i < until do
+        val c = s.charAt(i)
+        if c < '0' || c > '9' then ok = false
+        else
+          v = v * 10 + (c - '0').toLong
+          i += 1
+      if ok then Some(v) else None

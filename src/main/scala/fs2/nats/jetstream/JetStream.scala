@@ -434,33 +434,28 @@ object JetStream:
 
     // ---- Shared message construction + ack ----
 
+    // Shared placeholder for messages without a $JS.ACK reply (e.g. an
+    // AckPolicy.None push consumer): metadata is unavailable and acks are
+    // no-ops, so a single immutable instance is reused.
+    private val EmptyMetadata: JsMetadata =
+      JsMetadata("", "", 0L, 0L, 0L, 0L, java.time.Instant.EPOCH, None)
+
     private def buildJsMessage(m: NatsMessage): F[JsMessage[F]] =
       val reply = m.replyTo.getOrElse("")
       if reply.startsWith("$JS.ACK") then
         JsAckParser.parse(reply) match
-          case Right(meta) =>
-            Ref
-              .of[F, Boolean](false)
-              .map(acked => new JsMessageImpl(m, meta, acked))
-          case Left(err) =>
+          case Right(meta) => F.pure(new JsMessageImpl(m, meta))
+          case Left(err)   =>
             F.raiseError(
               NatsError.ProtocolParseError(
                 s"Invalid JetStream ACK subject: $err"
               )
             )
-      else
-        // No ACK reply (e.g. an AckPolicy.None push consumer): metadata is
-        // unavailable and acks are no-ops.
-        val meta =
-          JsMetadata("", "", 0L, 0L, 0L, 0L, java.time.Instant.EPOCH, None)
-        Ref
-          .of[F, Boolean](false)
-          .map(acked => new JsMessageImpl(m, meta, acked))
+      else F.pure(new JsMessageImpl(m, EmptyMetadata))
 
     private final class JsMessageImpl(
         raw: NatsMessage,
-        val metadata: JsMetadata,
-        acked: Ref[F, Boolean]
+        val metadata: JsMetadata
     ) extends JsMessage[F]:
       def subject: String = raw.subject
       def headers: Headers = raw.headers
@@ -469,6 +464,8 @@ object JetStream:
       def ackReply: String = raw.replyTo.getOrElse("")
 
       private val canAck: Boolean = ackReply.startsWith("$JS.ACK")
+      // Once-guard for finalizing acks; cheaper per message than a Ref.
+      private val acked = new java.util.concurrent.atomic.AtomicBoolean(false)
 
       def ack: F[Unit] = finalizeAck(AckBytes.Ack)
       def nak: F[Unit] = finalizeAck(AckBytes.Nak)
@@ -486,19 +483,21 @@ object JetStream:
       def ackSync: F[Unit] =
         if !canAck then F.unit
         else
-          acked.getAndSet(true).flatMap { was =>
-            if was then F.unit
-            else
+          F.defer {
+            if acked.compareAndSet(false, true) then
               client
                 .request(ackReply, AckBytes.Ack, Headers.empty, config.timeout)
                 .void
+            else F.unit
           }
 
       private def finalizeAck(bytes: Chunk[Byte]): F[Unit] =
         if !canAck then F.unit
         else
-          acked.getAndSet(true).flatMap { was =>
-            if was then F.unit else client.publish(ackReply, bytes)
+          F.defer {
+            if acked.compareAndSet(false, true) then
+              client.publish(ackReply, bytes)
+            else F.unit
           }
 
     private final class JsConsumerHandle(
