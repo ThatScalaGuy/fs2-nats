@@ -64,3 +64,12 @@ lazy val integration = project
     ),
     Test / fork := true
   )
+
+lazy val benchmarks = project
+  .in(file("benchmarks"))
+  .dependsOn(root)
+  .enablePlugins(JmhPlugin, NoPublishPlugin)
+  .settings(
+    name := "fs2-nats-benchmarks",
+    scalaVersion := V.scala3
+  )
