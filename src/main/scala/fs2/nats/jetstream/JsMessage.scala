@@ -103,7 +103,7 @@ private[jetstream] object AckBytes:
   * only the stream/consumer/domain strings are materialized — avoiding the full
   * `split` (a substring per token) and the V1 normalization copy.
   */
-private[jetstream] object JsAckParser:
+private[nats] object JsAckParser:
 
   private val Prefix = "$JS.ACK."
 

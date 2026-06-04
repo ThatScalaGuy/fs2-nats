@@ -37,6 +37,15 @@ class ApiSubjectsSpec extends FunSuite:
       default.msgDelete("ORDERS"),
       "$JS.API.STREAM.MSG.DELETE.ORDERS"
     )
+    assertEquals(default.directGet("KV_c"), "$JS.API.DIRECT.GET.KV_c")
+    assertEquals(
+      default.directGetLastBySubject("KV_c", "$KV.c.key"),
+      "$JS.API.DIRECT.GET.KV_c.$KV.c.key"
+    )
+  }
+
+  test("domain prefixes direct-get subjects") {
+    assertEquals(domain.directGet("KV_c"), "$JS.hub.API.DIRECT.GET.KV_c")
   }
 
   test("default prefix builds consumer subjects") {

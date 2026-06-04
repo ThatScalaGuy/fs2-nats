@@ -87,6 +87,28 @@ class JsProtocolSpec extends FunSuite:
     assert(json.contains("\"retention\":\"limits\""), clue = json)
   }
 
+  test("StreamConfig omits the KV flags by default (byte-stability)") {
+    val json = writeToString(StreamConfig("S"))
+    assert(!json.contains("allow_rollup_hdrs"), clue = json)
+    assert(!json.contains("deny_delete"), clue = json)
+    assert(!json.contains("discard_new_per_subject"), clue = json)
+  }
+
+  test("StreamConfig emits the KV flags when set and round-trips") {
+    val cfg = StreamConfig(
+      name = "KV_config",
+      subjects = List("$KV.config.>"),
+      allowRollupHdrs = true,
+      denyDelete = true,
+      discardNewPerSubject = true
+    )
+    val json = writeToString(cfg)
+    assert(json.contains("\"allow_rollup_hdrs\":true"), clue = json)
+    assert(json.contains("\"deny_delete\":true"), clue = json)
+    assert(json.contains("\"discard_new_per_subject\":true"), clue = json)
+    assertEquals(readFromString[StreamConfig](json), cfg)
+  }
+
   test("PubAck decodes including duplicate flag") {
     assertEquals(
       readFromString[PubAck](

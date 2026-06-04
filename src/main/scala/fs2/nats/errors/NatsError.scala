@@ -186,3 +186,16 @@ object NatsError:
     */
   final case class JetStreamPublishNoAck(subject: String)
       extends NatsError(s"No PubAck received for publish to '$subject'")
+
+  /** A KV `create`/`update` failed its optimistic-concurrency precondition: the
+    * key's latest revision did not match `expected` (server error code 10071).
+    *
+    * @param key
+    *   The key whose revision did not match
+    * @param expected
+    *   The revision the write expected (0 for `create`)
+    */
+  final case class KeyValueWrongLastSequence(key: String, expected: Long)
+      extends NatsError(
+        s"Wrong last sequence for key '$key' (expected revision $expected)"
+      )
