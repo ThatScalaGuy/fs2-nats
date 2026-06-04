@@ -16,7 +16,8 @@
 
 package fs2.nats.protocol
 
-import io.circe.{Decoder, Encoder}
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
 /** Server INFO message sent upon connection and asynchronously when cluster
   * topology changes. Contains server metadata and connection parameters.
@@ -66,7 +67,7 @@ final case class Info(
     go: String,
     host: String,
     port: Int,
-    headersSupported: Boolean = false,
+    @named("headers") headersSupported: Boolean = false,
     maxPayload: Long,
     clientId: Option[Long] = None,
     authRequired: Boolean = false,
@@ -74,71 +75,15 @@ final case class Info(
     tlsVerify: Boolean = false,
     tlsAvailable: Boolean = false,
     connectUrls: Option[List[String]] = None,
-    ldmMode: Boolean = false,
-    jetStream: Boolean = false,
+    @named("ldm") ldmMode: Boolean = false,
+    @named("jetstream") jetStream: Boolean = false,
     nonce: Option[String] = None
 )
 
 object Info:
-  given Decoder[Info] = Decoder.instance { c =>
-    for
-      serverId <- c.downField("server_id").as[String]
-      serverName <- c.downField("server_name").as[Option[String]]
-      version <- c.downField("version").as[String]
-      proto <- c.downField("proto").as[Int]
-      go <- c.downField("go").as[String]
-      host <- c.downField("host").as[String]
-      port <- c.downField("port").as[Int]
-      headersSupported <- c
-        .downField("headers")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      maxPayload <- c.downField("max_payload").as[Long]
-      clientId <- c.downField("client_id").as[Option[Long]]
-      authRequired <- c
-        .downField("auth_required")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      tlsRequired <- c
-        .downField("tls_required")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      tlsVerify <- c
-        .downField("tls_verify")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      tlsAvailable <- c
-        .downField("tls_available")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      connectUrls <- c.downField("connect_urls").as[Option[List[String]]]
-      ldmMode <- c.downField("ldm").as[Option[Boolean]].map(_.getOrElse(false))
-      jetStream <- c
-        .downField("jetstream")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      nonce <- c.downField("nonce").as[Option[String]]
-    yield Info(
-      serverId = serverId,
-      serverName = serverName,
-      version = version,
-      proto = proto,
-      go = go,
-      host = host,
-      port = port,
-      headersSupported = headersSupported,
-      maxPayload = maxPayload,
-      clientId = clientId,
-      authRequired = authRequired,
-      tlsRequired = tlsRequired,
-      tlsVerify = tlsVerify,
-      tlsAvailable = tlsAvailable,
-      connectUrls = connectUrls,
-      ldmMode = ldmMode,
-      jetStream = jetStream,
-      nonce = nonce
-    )
-  }
+  given JsonValueCodec[Info] = JsonCodecMaker.make(
+    CodecMakerConfig.withFieldNameMapper(JsonCodecMaker.enforce_snake_case)
+  )
 
 /** Client CONNECT message sent after receiving INFO from server. Contains
   * client metadata and authentication credentials.
@@ -191,35 +136,19 @@ final case class Connect(
     sig: Option[String] = None,
     jwt: Option[String] = None,
     nkey: Option[String] = None,
-    headersSupported: Boolean = true,
+    @named("headers") headersSupported: Boolean = true,
     noResponders: Boolean = true
 )
 
 object Connect:
-  given Encoder[Connect] = Encoder.instance { c =>
-    import io.circe.Json
-
-    val fields = List(
-      Some("verbose" -> Json.fromBoolean(c.verbose)),
-      Some("pedantic" -> Json.fromBoolean(c.pedantic)),
-      Some("tls_required" -> Json.fromBoolean(c.tlsRequired)),
-      c.authToken.map(t => "auth_token" -> Json.fromString(t)),
-      c.user.map(u => "user" -> Json.fromString(u)),
-      c.pass.map(p => "pass" -> Json.fromString(p)),
-      c.name.map(n => "name" -> Json.fromString(n)),
-      Some("lang" -> Json.fromString(c.lang)),
-      Some("version" -> Json.fromString(c.version)),
-      Some("protocol" -> Json.fromInt(c.protocol)),
-      Some("echo" -> Json.fromBoolean(c.echo)),
-      c.sig.map(s => "sig" -> Json.fromString(s)),
-      c.jwt.map(j => "jwt" -> Json.fromString(j)),
-      c.nkey.map(n => "nkey" -> Json.fromString(n)),
-      Some("headers" -> Json.fromBoolean(c.headersSupported)),
-      Some("no_responders" -> Json.fromBoolean(c.noResponders))
-    ).flatten
-
-    Json.obj(fields*)
-  }
+  // Always emit the scalar fields (even at their defaults) and omit only the
+  // None auth options — `withTransientDefault(false)` keeps the defaulted
+  // booleans/strings on the wire while `transientNone` (default) drops Nones.
+  given JsonValueCodec[Connect] = JsonCodecMaker.make(
+    CodecMakerConfig
+      .withFieldNameMapper(JsonCodecMaker.enforce_snake_case)
+      .withTransientDefault(false)
+  )
 
 /** PUB command for publishing a message without headers.
   *

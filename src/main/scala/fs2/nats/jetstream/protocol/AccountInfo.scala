@@ -16,57 +16,27 @@
 
 package fs2.nats.jetstream.protocol
 
-import io.circe.Decoder
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
 /** Per-account JetStream resource limits. `-1` means unlimited. */
 final case class AccountLimits(
-    maxMemory: Long,
-    maxStorage: Long,
-    maxStreams: Int,
-    maxConsumers: Int
+    maxMemory: Long = 0L,
+    maxStorage: Long = 0L,
+    maxStreams: Int = -1,
+    maxConsumers: Int = -1
 )
 object AccountLimits:
-  given Decoder[AccountLimits] = Decoder.instance { c =>
-    for
-      maxMemory <- c
-        .downField("max_memory")
-        .as[Option[Long]]
-        .map(_.getOrElse(0L))
-      maxStorage <- c
-        .downField("max_storage")
-        .as[Option[Long]]
-        .map(_.getOrElse(0L))
-      maxStreams <- c
-        .downField("max_streams")
-        .as[Option[Int]]
-        .map(_.getOrElse(-1))
-      maxConsumers <- c
-        .downField("max_consumers")
-        .as[Option[Int]]
-        .map(_.getOrElse(-1))
-    yield AccountLimits(maxMemory, maxStorage, maxStreams, maxConsumers)
-  }
+  given JsonValueCodec[AccountLimits] = JsonCodecMaker.make(JsWire.snake)
 
 /** Account-level JetStream usage and limits (`$JS.API.INFO`). */
 final case class AccountInfo(
-    memory: Long,
-    storage: Long,
-    streams: Int,
-    consumers: Int,
-    domain: Option[String],
-    limits: AccountLimits
+    memory: Long = 0L,
+    storage: Long = 0L,
+    streams: Int = 0,
+    consumers: Int = 0,
+    domain: Option[String] = None,
+    limits: AccountLimits = AccountLimits()
 )
 object AccountInfo:
-  given Decoder[AccountInfo] = Decoder.instance { c =>
-    for
-      memory <- c.downField("memory").as[Option[Long]].map(_.getOrElse(0L))
-      storage <- c.downField("storage").as[Option[Long]].map(_.getOrElse(0L))
-      streams <- c.downField("streams").as[Option[Int]].map(_.getOrElse(0))
-      consumers <- c.downField("consumers").as[Option[Int]].map(_.getOrElse(0))
-      domain <- c.downField("domain").as[Option[String]]
-      limits <- c
-        .downField("limits")
-        .as[Option[AccountLimits]]
-        .map(_.getOrElse(AccountLimits(0L, 0L, -1, -1)))
-    yield AccountInfo(memory, storage, streams, consumers, domain, limits)
-  }
+  given JsonValueCodec[AccountInfo] = JsonCodecMaker.make(JsWire.snake)

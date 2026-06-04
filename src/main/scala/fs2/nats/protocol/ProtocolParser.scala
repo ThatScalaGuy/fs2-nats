@@ -17,8 +17,10 @@
 package fs2.nats.protocol
 
 import cats.effect.Async
+import com.github.plokhotnyuk.jsoniter_scala.core.*
 import fs2.{Chunk, Pipe, Pull, Stream}
 import java.nio.charset.StandardCharsets
+import scala.util.{Failure, Success, Try}
 
 /** Configuration for the NATS protocol parser.
   *
@@ -169,14 +171,14 @@ object ProtocolParser:
       input: Stream[F, Byte]
   ): Pull[F, NatsFrame, Unit] =
     val jsonStr = line.drop(5).trim
-    io.circe.parser.decode[Info](jsonStr) match
-      case Right(info) =>
+    Try(readFromString[Info](jsonStr)) match
+      case Success(info) =>
         Pull.output1(NatsFrame.InfoFrame(info)) >> parseLoop(
           config,
           remaining,
           input
         )
-      case Left(err) =>
+      case Failure(err) =>
         emitParseError(config, s"Failed to parse INFO JSON: ${err.getMessage}")
 
   private def parseMsgFrame[F[_]: Async](

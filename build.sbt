@@ -4,14 +4,14 @@ lazy val V = new {
   val scala3 = "3.3.7"
   val catsEffect = "3.6.3"
   val fs2 = "3.12.2"
-  val circe = "0.14.15"
+  val jsoniter = "2.38.14"
   val munit = "1.2.1"
   val munitCatsEffect = "2.1.0"
   val scalaCheck = "1.19.0"
   val munitScalaCheck = "1.2.0"
 }
 
-ThisBuild / tlBaseVersion := "0.1"
+ThisBuild / tlBaseVersion := "0.2"
 ThisBuild / organization := "de.thatscalaguy"
 ThisBuild / organizationName := "ThatScalaGuy"
 ThisBuild / startYear := Some(2025)
@@ -42,9 +42,8 @@ lazy val root = project
       "org.typelevel" %% "cats-effect" % V.catsEffect,
       "co.fs2" %% "fs2-core" % V.fs2,
       "co.fs2" %% "fs2-io" % V.fs2,
-      "io.circe" %% "circe-core" % V.circe,
-      "io.circe" %% "circe-generic" % V.circe,
-      "io.circe" %% "circe-parser" % V.circe,
+      "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-core" % V.jsoniter,
+      "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-macros" % V.jsoniter % "compile-internal",
       "org.scalameta" %% "munit" % V.munit % Test,
       "org.typelevel" %% "munit-cats-effect" % V.munitCatsEffect % Test,
       "org.scalacheck" %% "scalacheck" % V.scalaCheck % Test,

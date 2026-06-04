@@ -16,7 +16,9 @@
 
 package fs2.nats.jetstream.protocol
 
-import io.circe.{Encoder, Json}
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
+import fs2.nats.jetstream.protocol.JsWire.given
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -30,12 +32,4 @@ final case class PullRequest(
 )
 
 object PullRequest:
-  given Encoder[PullRequest] = Encoder.instance { r =>
-    JsWire.obj(
-      Some("batch" -> Json.fromInt(r.batch)),
-      Some("expires" -> JsWire.durationToNanos(r.expires)),
-      r.maxBytes.map(b => "max_bytes" -> Json.fromInt(b)),
-      Option.when(r.noWait)("no_wait" -> Json.fromBoolean(true)),
-      r.idleHeartbeat.map(d => "idle_heartbeat" -> JsWire.durationToNanos(d))
-    )
-  }
+  given JsonValueCodec[PullRequest] = JsonCodecMaker.make(JsWire.snake)

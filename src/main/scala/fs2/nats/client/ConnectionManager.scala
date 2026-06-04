@@ -27,7 +27,7 @@ import fs2.nats.errors.NatsError
 import fs2.nats.protocol.{Connect, Info, NatsFrame, ParserConfig}
 import fs2.nats.publish.SerializationUtils
 import fs2.nats.transport.{NatsSocket, TlsTransport, Transport, TransportConfig}
-import io.circe.syntax.*
+import com.github.plokhotnyuk.jsoniter_scala.core.*
 import java.time.Instant
 
 /** State of the NATS connection.
@@ -340,7 +340,7 @@ object ConnectionManager:
 
     private def sendConnect(transport: Transport[F], info: Info): F[Unit] =
       val connectMsg = buildConnectMessage(info)
-      val connectJson = connectMsg.asJson.noSpaces
+      val connectJson = writeToString(connectMsg)
       val connectBytes = SerializationUtils.buildConnect(connectJson)
 
       transport.send(connectBytes) *>

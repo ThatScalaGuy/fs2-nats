@@ -16,7 +16,8 @@
 
 package fs2.nats.jetstream.protocol
 
-import io.circe.Decoder
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
 /** The error envelope present on a failed JetStream API response:
   * `{"type":…,"error":{"code":<http>,"err_code":<uint16>,"description":…}}`.
@@ -28,28 +29,31 @@ import io.circe.Decoder
   * @param description
   *   Human-readable error description
   */
-final case class ApiError(code: Int, errCode: Int, description: String)
+final case class ApiError(code: Int, errCode: Int = 0, description: String = "")
 
 object ApiError:
-  given Decoder[ApiError] = Decoder.instance { c =>
-    for
-      code <- c.downField("code").as[Int]
-      errCode <- c.downField("err_code").as[Option[Int]].map(_.getOrElse(0))
-      description <- c
-        .downField("description")
-        .as[Option[String]]
-        .map(_.getOrElse(""))
-    yield ApiError(code, errCode, description)
-  }
+  given JsonValueCodec[ApiError] = JsonCodecMaker.make(JsWire.snake)
 
 /** A minimal `{"success": <bool>}` response used by delete/purge-style API
   * calls that carry no other payload.
   */
-final case class SuccessResponse(success: Boolean)
+final case class SuccessResponse(success: Boolean = false)
 
 object SuccessResponse:
-  given Decoder[SuccessResponse] = Decoder.instance { c =>
-    c.downField("success")
-      .as[Option[Boolean]]
-      .map(b => SuccessResponse(b.getOrElse(false)))
-  }
+  given JsonValueCodec[SuccessResponse] = JsonCodecMaker.make(JsWire.snake)
+
+/** Reads just the `error` envelope from any API response, ignoring the success
+  * payload (jsoniter skips unexpected fields by default). The first of the
+  * two-pass decode used by [[fs2.nats.jetstream.JetStream]].
+  */
+private[jetstream] final case class ApiErrorEnvelope(
+    error: Option[ApiError] = None
+)
+private[jetstream] object ApiErrorEnvelope:
+  given JsonValueCodec[ApiErrorEnvelope] = JsonCodecMaker.make(JsWire.snake)
+
+/** Wrapper for `STREAM.MSG.GET` responses, whose payload lives under `message`.
+  */
+private[jetstream] final case class GetMsgResponse(message: StoredMessage)
+private[jetstream] object GetMsgResponse:
+  given JsonValueCodec[GetMsgResponse] = JsonCodecMaker.make(JsWire.snake)

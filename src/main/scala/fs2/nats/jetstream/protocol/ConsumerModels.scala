@@ -16,11 +16,11 @@
 
 package fs2.nats.jetstream.protocol
 
-import io.circe.syntax.*
-import io.circe.{Decoder, Encoder, Json}
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
 import java.time.Instant
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.*
 
 /** Consumer configuration. Push-only fields (`deliverSubject`/`deliverGroup`/
   * `flowControl`/`idleHeartbeat`) take effect only when `deliverSubject` is
@@ -52,237 +52,219 @@ final case class ConsumerConfig(
 )
 
 object ConsumerConfig:
-  given Encoder[ConsumerConfig] = Encoder.instance { c =>
-    // filter_subject and filter_subjects are mutually exclusive; prefer the
-    // explicit list when present.
-    val singleFilter =
-      if c.filterSubjects.isEmpty then c.filterSubject else None
-    JsWire.obj(
-      c.durable.map("durable_name" -> Json.fromString(_)),
-      c.name.map("name" -> Json.fromString(_)),
-      c.description.map("description" -> Json.fromString(_)),
-      Some("deliver_policy" -> c.deliverPolicy.asJson),
-      c.optStartSeq.map(s => "opt_start_seq" -> Json.fromLong(s)),
-      c.optStartTime.map(t => "opt_start_time" -> JsWire.instantToJson(t)),
-      Some("ack_policy" -> c.ackPolicy.asJson),
-      c.ackWait.map(d => "ack_wait" -> JsWire.durationToNanos(d)),
-      Option.when(c.maxDeliver != -1)(
-        "max_deliver" -> Json.fromInt(c.maxDeliver)
-      ),
-      Option.when(c.backoff.nonEmpty)(
-        "backoff" -> Json.fromValues(c.backoff.map(JsWire.durationToNanos))
-      ),
-      singleFilter.map("filter_subject" -> Json.fromString(_)),
-      Option.when(c.filterSubjects.nonEmpty)(
-        "filter_subjects" -> Json.fromValues(
-          c.filterSubjects.map(Json.fromString)
-        )
-      ),
-      Some("replay_policy" -> c.replayPolicy.asJson),
-      Option.when(c.headersOnly)("headers_only" -> Json.fromBoolean(true)),
-      Option.when(c.maxAckPending != -1)(
-        "max_ack_pending" -> Json.fromInt(c.maxAckPending)
-      ),
-      Option.when(c.maxWaiting != -1)(
-        "max_waiting" -> Json.fromInt(c.maxWaiting)
-      ),
-      c.inactiveThreshold.map(d =>
-        "inactive_threshold" -> JsWire.durationToNanos(d)
-      ),
-      c.numReplicas.map(n => "num_replicas" -> Json.fromInt(n)),
-      c.deliverSubject.map("deliver_subject" -> Json.fromString(_)),
-      c.deliverGroup.map("deliver_group" -> Json.fromString(_)),
-      Option.when(c.flowControl)("flow_control" -> Json.fromBoolean(true)),
-      c.idleHeartbeat.map(d => "idle_heartbeat" -> JsWire.durationToNanos(d))
-    )
-  }
+  // Hand-written: `filter_subject`/`filter_subjects` are mutually exclusive,
+  // the `-1` sentinels / `false` flags / empty lists are omitted, and durations
+  // use the `0 == None` convention on decode — none macro-expressible.
+  given JsonValueCodec[ConsumerConfig] = new JsonValueCodec[ConsumerConfig]:
+    private val deliverC = summon[JsonValueCodec[DeliverPolicy]]
+    private val ackC = summon[JsonValueCodec[AckPolicy]]
+    private val replayC = summon[JsonValueCodec[ReplayPolicy]]
 
-  given Decoder[ConsumerConfig] =
-    import JsWire.given
-    Decoder.instance { c =>
-      for
-        durable <- c.downField("durable_name").as[Option[String]]
-        name <- c.downField("name").as[Option[String]]
-        description <- c.downField("description").as[Option[String]]
-        deliverPolicy <- c
-          .downField("deliver_policy")
-          .as[Option[DeliverPolicy]]
-          .map(_.getOrElse(DeliverPolicy.All))
-        optStartSeq <- c.downField("opt_start_seq").as[Option[Long]]
-        optStartTime <- c.downField("opt_start_time").as[Option[Instant]]
-        ackPolicy <- c
-          .downField("ack_policy")
-          .as[Option[AckPolicy]]
-          .map(_.getOrElse(AckPolicy.Explicit))
-        ackWait <- JsWire.optDurationNanos(c.downField("ack_wait"))
-        maxDeliver <- c
-          .downField("max_deliver")
-          .as[Option[Int]]
-          .map(_.getOrElse(-1))
-        backoff <- c
-          .downField("backoff")
-          .as[Option[List[Long]]]
-          .map(_.getOrElse(Nil).map(JsWire.nanosToDuration))
-        filterSubject <- c.downField("filter_subject").as[Option[String]]
-        filterSubjects <- c
-          .downField("filter_subjects")
-          .as[Option[List[String]]]
-          .map(_.getOrElse(Nil))
-        replayPolicy <- c
-          .downField("replay_policy")
-          .as[Option[ReplayPolicy]]
-          .map(_.getOrElse(ReplayPolicy.Instant))
-        headersOnly <- c
-          .downField("headers_only")
-          .as[Option[Boolean]]
-          .map(_.getOrElse(false))
-        maxAckPending <- c
-          .downField("max_ack_pending")
-          .as[Option[Int]]
-          .map(_.getOrElse(-1))
-        maxWaiting <- c
-          .downField("max_waiting")
-          .as[Option[Int]]
-          .map(_.getOrElse(-1))
-        inactiveThreshold <- JsWire.optDurationNanos(
-          c.downField("inactive_threshold")
+    def nullValue: ConsumerConfig = null
+
+    def encodeValue(c: ConsumerConfig, out: JsonWriter): Unit =
+      // filter_subject and filter_subjects are mutually exclusive; prefer the
+      // explicit list when present.
+      val singleFilter =
+        if c.filterSubjects.isEmpty then c.filterSubject else None
+      out.writeObjectStart()
+      c.durable.foreach { v => out.writeKey("durable_name"); out.writeVal(v) }
+      c.name.foreach { v => out.writeKey("name"); out.writeVal(v) }
+      c.description.foreach { v =>
+        out.writeKey("description"); out.writeVal(v)
+      }
+      out.writeKey("deliver_policy"); deliverC.encodeValue(c.deliverPolicy, out)
+      c.optStartSeq.foreach { v =>
+        out.writeKey("opt_start_seq"); out.writeVal(v)
+      }
+      c.optStartTime.foreach { v =>
+        out.writeKey("opt_start_time"); out.writeVal(v)
+      }
+      out.writeKey("ack_policy"); ackC.encodeValue(c.ackPolicy, out)
+      c.ackWait.foreach { d =>
+        out.writeKey("ack_wait"); out.writeVal(d.toNanos)
+      }
+      if c.maxDeliver != -1 then
+        out.writeKey("max_deliver"); out.writeVal(c.maxDeliver)
+      if c.backoff.nonEmpty then
+        out.writeKey("backoff")
+        out.writeArrayStart()
+        c.backoff.foreach(d => out.writeVal(d.toNanos))
+        out.writeArrayEnd()
+      singleFilter.foreach { v =>
+        out.writeKey("filter_subject"); out.writeVal(v)
+      }
+      if c.filterSubjects.nonEmpty then
+        out.writeKey("filter_subjects")
+        out.writeArrayStart()
+        c.filterSubjects.foreach(out.writeVal)
+        out.writeArrayEnd()
+      out.writeKey("replay_policy"); replayC.encodeValue(c.replayPolicy, out)
+      if c.headersOnly then
+        out.writeKey("headers_only")
+        out.writeVal(true)
+      if c.maxAckPending != -1 then
+        out.writeKey("max_ack_pending"); out.writeVal(c.maxAckPending)
+      if c.maxWaiting != -1 then
+        out.writeKey("max_waiting"); out.writeVal(c.maxWaiting)
+      c.inactiveThreshold.foreach { d =>
+        out.writeKey("inactive_threshold"); out.writeVal(d.toNanos)
+      }
+      c.numReplicas.foreach { v =>
+        out.writeKey("num_replicas"); out.writeVal(v)
+      }
+      c.deliverSubject.foreach { v =>
+        out.writeKey("deliver_subject"); out.writeVal(v)
+      }
+      c.deliverGroup.foreach { v =>
+        out.writeKey("deliver_group"); out.writeVal(v)
+      }
+      if c.flowControl then
+        out.writeKey("flow_control")
+        out.writeVal(true)
+      c.idleHeartbeat.foreach { d =>
+        out.writeKey("idle_heartbeat"); out.writeVal(d.toNanos)
+      }
+      out.writeObjectEnd()
+
+    def decodeValue(in: JsonReader, default: ConsumerConfig): ConsumerConfig =
+      if in.isNextToken('{') then
+        var durable: Option[String] = None
+        var name: Option[String] = None
+        var description: Option[String] = None
+        var deliverPolicy = DeliverPolicy.All
+        var optStartSeq: Option[Long] = None
+        var optStartTime: Option[Instant] = None
+        var ackPolicy = AckPolicy.Explicit
+        var ackWait: Option[FiniteDuration] = None
+        var maxDeliver = -1
+        var backoff: List[FiniteDuration] = Nil
+        var filterSubject: Option[String] = None
+        var filterSubjects: List[String] = Nil
+        var replayPolicy = ReplayPolicy.Instant
+        var headersOnly = false
+        var maxAckPending = -1
+        var maxWaiting = -1
+        var inactiveThreshold: Option[FiniteDuration] = None
+        var numReplicas: Option[Int] = None
+        var deliverSubject: Option[String] = None
+        var deliverGroup: Option[String] = None
+        var flowControl = false
+        var idleHeartbeat: Option[FiniteDuration] = None
+        if !in.isNextToken('}') then
+          in.rollbackToken()
+          var cont = true
+          while cont do
+            val l = in.readKeyAsCharBuf()
+            if in.isCharBufEqualsTo(l, "durable_name") then
+              durable = Some(in.readString(null))
+            else if in.isCharBufEqualsTo(l, "name") then
+              name = Some(in.readString(null))
+            else if in.isCharBufEqualsTo(l, "description") then
+              description = Some(in.readString(null))
+            else if in.isCharBufEqualsTo(l, "deliver_policy") then
+              deliverPolicy = deliverC.decodeValue(in, deliverPolicy)
+            else if in.isCharBufEqualsTo(l, "opt_start_seq") then
+              optStartSeq = Some(in.readLong())
+            else if in.isCharBufEqualsTo(l, "opt_start_time") then
+              optStartTime = Some(in.readInstant(null))
+            else if in.isCharBufEqualsTo(l, "ack_policy") then
+              ackPolicy = ackC.decodeValue(in, ackPolicy)
+            else if in.isCharBufEqualsTo(l, "ack_wait") then
+              ackWait = JsRead.optDurationNanos(in)
+            else if in.isCharBufEqualsTo(l, "max_deliver") then
+              maxDeliver = in.readInt()
+            else if in.isCharBufEqualsTo(l, "backoff") then
+              backoff = JsRead.durationListNanos(in)
+            else if in.isCharBufEqualsTo(l, "filter_subject") then
+              filterSubject = Some(in.readString(null))
+            else if in.isCharBufEqualsTo(l, "filter_subjects") then
+              filterSubjects = JsRead.stringList(in)
+            else if in.isCharBufEqualsTo(l, "replay_policy") then
+              replayPolicy = replayC.decodeValue(in, replayPolicy)
+            else if in.isCharBufEqualsTo(l, "headers_only") then
+              headersOnly = in.readBoolean()
+            else if in.isCharBufEqualsTo(l, "max_ack_pending") then
+              maxAckPending = in.readInt()
+            else if in.isCharBufEqualsTo(l, "max_waiting") then
+              maxWaiting = in.readInt()
+            else if in.isCharBufEqualsTo(l, "inactive_threshold") then
+              inactiveThreshold = JsRead.optDurationNanos(in)
+            else if in.isCharBufEqualsTo(l, "num_replicas") then
+              numReplicas = Some(in.readInt())
+            else if in.isCharBufEqualsTo(l, "deliver_subject") then
+              deliverSubject = Some(in.readString(null))
+            else if in.isCharBufEqualsTo(l, "deliver_group") then
+              deliverGroup = Some(in.readString(null))
+            else if in.isCharBufEqualsTo(l, "flow_control") then
+              flowControl = in.readBoolean()
+            else if in.isCharBufEqualsTo(l, "idle_heartbeat") then
+              idleHeartbeat = JsRead.optDurationNanos(in)
+            else in.skip()
+            cont = in.isNextToken(',')
+          if !in.isCurrentToken('}') then in.objectEndOrCommaError()
+        ConsumerConfig(
+          durable,
+          name,
+          description,
+          deliverPolicy,
+          optStartSeq,
+          optStartTime,
+          ackPolicy,
+          ackWait,
+          maxDeliver,
+          backoff,
+          filterSubject,
+          filterSubjects,
+          replayPolicy,
+          headersOnly,
+          maxAckPending,
+          maxWaiting,
+          inactiveThreshold,
+          numReplicas,
+          deliverSubject,
+          deliverGroup,
+          flowControl,
+          idleHeartbeat
         )
-        numReplicas <- c.downField("num_replicas").as[Option[Int]]
-        deliverSubject <- c.downField("deliver_subject").as[Option[String]]
-        deliverGroup <- c.downField("deliver_group").as[Option[String]]
-        flowControl <- c
-          .downField("flow_control")
-          .as[Option[Boolean]]
-          .map(_.getOrElse(false))
-        idleHeartbeat <- JsWire.optDurationNanos(c.downField("idle_heartbeat"))
-      yield ConsumerConfig(
-        durable,
-        name,
-        description,
-        deliverPolicy,
-        optStartSeq,
-        optStartTime,
-        ackPolicy,
-        ackWait,
-        maxDeliver,
-        backoff,
-        filterSubject,
-        filterSubjects,
-        replayPolicy,
-        headersOnly,
-        maxAckPending,
-        maxWaiting,
-        inactiveThreshold,
-        numReplicas,
-        deliverSubject,
-        deliverGroup,
-        flowControl,
-        idleHeartbeat
-      )
-    }
+      else in.readNullOrTokenError(default, '{')
 
 /** A consumer/stream sequence pair. */
-final case class SequencePair(consumerSeq: Long, streamSeq: Long)
+final case class SequencePair(consumerSeq: Long = 0L, streamSeq: Long = 0L)
 object SequencePair:
-  given Decoder[SequencePair] = Decoder.instance { c =>
-    for
-      consumerSeq <- c
-        .downField("consumer_seq")
-        .as[Option[Long]]
-        .map(_.getOrElse(0L))
-      streamSeq <- c
-        .downField("stream_seq")
-        .as[Option[Long]]
-        .map(_.getOrElse(0L))
-    yield SequencePair(consumerSeq, streamSeq)
-  }
+  given JsonValueCodec[SequencePair] = JsonCodecMaker.make(JsWire.snake)
 
 /** Consumer information returned by create/update/info. */
 final case class ConsumerInfo(
-    stream: String,
+    @named("stream_name") stream: String,
     name: String,
     config: ConsumerConfig,
     delivered: SequencePair,
     ackFloor: SequencePair,
-    numPending: Long,
-    numAckPending: Long,
-    numRedelivered: Long,
-    numWaiting: Int,
+    numPending: Long = 0L,
+    numAckPending: Long = 0L,
+    numRedelivered: Long = 0L,
+    numWaiting: Int = 0,
     created: Instant
 )
 object ConsumerInfo:
-  given Decoder[ConsumerInfo] =
-    import JsWire.given
-    Decoder.instance { c =>
-      for
-        stream <- c.downField("stream_name").as[String]
-        name <- c.downField("name").as[String]
-        config <- c.downField("config").as[ConsumerConfig]
-        delivered <- c.downField("delivered").as[SequencePair]
-        ackFloor <- c.downField("ack_floor").as[SequencePair]
-        numPending <- c
-          .downField("num_pending")
-          .as[Option[Long]]
-          .map(_.getOrElse(0L))
-        numAckPending <- c
-          .downField("num_ack_pending")
-          .as[Option[Long]]
-          .map(_.getOrElse(0L))
-        numRedelivered <- c
-          .downField("num_redelivered")
-          .as[Option[Long]]
-          .map(_.getOrElse(0L))
-        numWaiting <- c
-          .downField("num_waiting")
-          .as[Option[Int]]
-          .map(_.getOrElse(0))
-        created <- c.downField("created").as[Instant]
-      yield ConsumerInfo(
-        stream,
-        name,
-        config,
-        delivered,
-        ackFloor,
-        numPending,
-        numAckPending,
-        numRedelivered,
-        numWaiting,
-        created
-      )
-    }
+  given JsonValueCodec[ConsumerInfo] = JsonCodecMaker.make(JsWire.snake)
 
 /** Page of consumer names (paginated `CONSUMER.NAMES`). */
 private[jetstream] final case class ConsumerNamesResponse(
-    consumers: List[String],
-    total: Int,
-    offset: Int
+    consumers: List[String] = Nil,
+    total: Int = 0,
+    offset: Int = 0
 )
 private[jetstream] object ConsumerNamesResponse:
-  given Decoder[ConsumerNamesResponse] = Decoder.instance { c =>
-    for
-      consumers <- c
-        .downField("consumers")
-        .as[Option[List[String]]]
-        .map(_.getOrElse(Nil))
-      total <- c.downField("total").as[Option[Int]].map(_.getOrElse(0))
-      offset <- c.downField("offset").as[Option[Int]].map(_.getOrElse(0))
-    yield ConsumerNamesResponse(consumers, total, offset)
-  }
+  given JsonValueCodec[ConsumerNamesResponse] =
+    JsonCodecMaker.make(JsWire.snake)
 
 /** Page of full consumer info (paginated `CONSUMER.LIST`). */
 private[jetstream] final case class ConsumerListResponse(
-    consumers: List[ConsumerInfo],
-    total: Int,
-    offset: Int
+    consumers: List[ConsumerInfo] = Nil,
+    total: Int = 0,
+    offset: Int = 0
 )
 private[jetstream] object ConsumerListResponse:
-  given Decoder[ConsumerListResponse] = Decoder.instance { c =>
-    for
-      consumers <- c
-        .downField("consumers")
-        .as[Option[List[ConsumerInfo]]]
-        .map(_.getOrElse(Nil))
-      total <- c.downField("total").as[Option[Int]].map(_.getOrElse(0))
-      offset <- c.downField("offset").as[Option[Int]].map(_.getOrElse(0))
-    yield ConsumerListResponse(consumers, total, offset)
-  }
+  given JsonValueCodec[ConsumerListResponse] = JsonCodecMaker.make(JsWire.snake)

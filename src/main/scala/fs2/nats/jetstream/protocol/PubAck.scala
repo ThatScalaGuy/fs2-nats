@@ -16,7 +16,8 @@
 
 package fs2.nats.jetstream.protocol
 
-import io.circe.Decoder
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
 /** Acknowledgement returned by the server for a successful JetStream publish.
   *
@@ -37,14 +38,4 @@ final case class PubAck(
 )
 
 object PubAck:
-  given Decoder[PubAck] = Decoder.instance { c =>
-    for
-      stream <- c.downField("stream").as[String]
-      seq <- c.downField("seq").as[Long]
-      duplicate <- c
-        .downField("duplicate")
-        .as[Option[Boolean]]
-        .map(_.getOrElse(false))
-      domain <- c.downField("domain").as[Option[String]]
-    yield PubAck(stream, seq, duplicate, domain)
-  }
+  given JsonValueCodec[PubAck] = JsonCodecMaker.make(JsWire.snake)
