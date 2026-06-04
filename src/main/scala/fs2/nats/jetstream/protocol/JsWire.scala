@@ -16,52 +16,79 @@
 
 package fs2.nats.jetstream.protocol
 
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import com.github.plokhotnyuk.jsoniter_scala.macros.*
 import fs2.Chunk
-import io.circe.{ACursor, Decoder, Json}
 
-import java.time.Instant
-import java.util.Base64
 import scala.concurrent.duration.*
 
-/** Shared wire-encoding helpers for JetStream JSON, centralizing the codec
-  * foot-guns called out in the design: durations are encoded as int64
-  * nanoseconds, timestamps as RFC3339 strings, and binary blobs as base64.
+/** Shared jsoniter wire-encoding helpers for JetStream JSON, centralizing the
+  * codec foot-guns called out in the design: durations are encoded as int64
+  * nanoseconds, binary blobs as base64. Timestamps use jsoniter's built-in
+  * `Instant` codec (ISO-8601), which matches the RFC3339 the server emits.
   */
 private[jetstream] object JsWire:
 
-  /** Encode a duration as int64 nanoseconds (the JetStream wire format). */
-  def durationToNanos(d: FiniteDuration): Json = Json.fromLong(d.toNanos)
-
-  /** Decode int64 nanoseconds into a `FiniteDuration`. */
-  def nanosToDuration(nanos: Long): FiniteDuration = nanos.nanos
-
-  /** Encode an `Instant` as an RFC3339 string. */
-  def instantToJson(i: Instant): Json = Json.fromString(i.toString)
-
-  /** Encode binary data as a base64 string. */
-  def bytesToBase64(bytes: Chunk[Byte]): Json =
-    Json.fromString(Base64.getEncoder.encodeToString(bytes.toArray))
-
-  /** Decode an optional duration field given in nanoseconds. A `0` (or absent)
-    * value is treated as `None` (JetStream's "unset/unlimited" convention).
+  /** Shared config: map camelCase case-class fields to their snake_case wire
+    * names. Individual fields override this with `@named` where irregular.
+    * `inline` so the jsoniter `make` macro can read it as a constant
+    * expression.
     */
-  def optDurationNanos(c: ACursor): Decoder.Result[Option[FiniteDuration]] =
-    c.as[Option[Long]].map(_.filter(_ > 0).map(nanosToDuration))
+  inline def snake: CodecMakerConfig =
+    CodecMakerConfig.withFieldNameMapper(JsonCodecMaker.enforce_snake_case)
 
-  /** Decoder for an RFC3339 timestamp string into an `Instant`. */
-  given Decoder[Instant] = Decoder.decodeString.emap { s =>
-    try Right(Instant.parse(s))
-    catch case _: Throwable => Left(s"Invalid RFC3339 timestamp: $s")
-  }
+  /** Durations on the JetStream wire are int64 nanoseconds. */
+  given JsonValueCodec[FiniteDuration] with
+    def decodeValue(in: JsonReader, default: FiniteDuration): FiniteDuration =
+      in.readLong().nanos
+    def encodeValue(x: FiniteDuration, out: JsonWriter): Unit =
+      out.writeVal(x.toNanos)
+    def nullValue: FiniteDuration = null
 
-  /** Decoder for a base64 string into a `Chunk[Byte]`. */
-  given Decoder[Chunk[Byte]] = Decoder.decodeString.emap { s =>
-    try Right(Chunk.array(Base64.getDecoder.decode(s)))
-    catch case _: Throwable => Left(s"Invalid base64 data")
-  }
+  /** Binary blobs are standard (padded) base64 strings. */
+  given JsonValueCodec[Chunk[Byte]] with
+    def decodeValue(in: JsonReader, default: Chunk[Byte]): Chunk[Byte] =
+      Chunk.array(in.readBase64AsBytes(null))
+    def encodeValue(x: Chunk[Byte], out: JsonWriter): Unit =
+      out.writeBase64Val(x.toArray, doPadding = true)
+    def nullValue: Chunk[Byte] = null
 
-  /** Build a JSON object from optional fields, omitting `None` entries (the
-    * `omitempty` convention used throughout the JetStream API).
+/** Low-level read helpers shared by the hand-written codecs. */
+private[protocol] object JsRead:
+
+  /** Read a JSON array of strings into a `List`. */
+  def stringList(in: JsonReader): List[String] =
+    if in.isNextToken('[') then
+      if in.isNextToken(']') then Nil
+      else
+        in.rollbackToken()
+        val b = List.newBuilder[String]
+        var cont = true
+        while cont do
+          b += in.readString(null)
+          cont = in.isNextToken(',')
+        if !in.isCurrentToken(']') then in.arrayEndOrCommaError()
+        b.result()
+    else in.readNullOrTokenError(Nil, '[')
+
+  /** Read a JSON array of int64 nanoseconds into a `List[FiniteDuration]`. */
+  def durationListNanos(in: JsonReader): List[FiniteDuration] =
+    if in.isNextToken('[') then
+      if in.isNextToken(']') then Nil
+      else
+        in.rollbackToken()
+        val b = List.newBuilder[FiniteDuration]
+        var cont = true
+        while cont do
+          b += in.readLong().nanos
+          cont = in.isNextToken(',')
+        if !in.isCurrentToken(']') then in.arrayEndOrCommaError()
+        b.result()
+    else in.readNullOrTokenError(Nil, '[')
+
+  /** Decode an int64-nanoseconds duration, treating `0` as `None` (JetStream's
+    * "unset/unlimited" convention).
     */
-  def obj(fields: Option[(String, Json)]*): Json =
-    Json.obj(fields.flatten*)
+  def optDurationNanos(in: JsonReader): Option[FiniteDuration] =
+    val v = in.readLong()
+    if v > 0 then Some(v.nanos) else None

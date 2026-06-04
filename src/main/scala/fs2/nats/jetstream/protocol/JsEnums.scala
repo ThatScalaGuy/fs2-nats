@@ -16,22 +16,27 @@
 
 package fs2.nats.jetstream.protocol
 
-import io.circe.{Decoder, Encoder}
+import com.github.plokhotnyuk.jsoniter_scala.core.*
 
-/** Helper to build a string-valued circe codec pair from an explicit wire
+/** Helper to build a string-valued jsoniter codec from an explicit wire
   * mapping, raising a decode error on unknown values.
   */
 private[protocol] object EnumCodec:
-  def encoder[A](toWire: A => String): Encoder[A] =
-    Encoder.encodeString.contramap(toWire)
-
-  def decoder[A](
+  def apply[A](
       name: String,
+      toWire: A => String,
       fromWire: PartialFunction[String, A]
-  ): Decoder[A] =
-    Decoder.decodeString.emap { s =>
-      fromWire.lift(s).toRight(s"Unknown $name value: $s")
-    }
+  ): JsonValueCodec[A] =
+    new JsonValueCodec[A]:
+      private val lifted = fromWire.lift
+      def decodeValue(in: JsonReader, default: A): A =
+        val s = in.readString(null)
+        lifted(s) match
+          case Some(a) => a
+          case None    => in.decodeError(s"Unknown $name value: $s")
+      def encodeValue(x: A, out: JsonWriter): Unit =
+        out.writeVal(toWire(x))
+      def nullValue: A = null.asInstanceOf[A]
 
 /** Stream retention policy. */
 enum RetentionPolicy:
@@ -41,9 +46,9 @@ object RetentionPolicy:
     case Limits    => "limits"
     case Interest  => "interest"
     case WorkQueue => "workqueue"
-  given Encoder[RetentionPolicy] = EnumCodec.encoder(toWire)
-  given Decoder[RetentionPolicy] = EnumCodec.decoder(
+  given JsonValueCodec[RetentionPolicy] = EnumCodec(
     "RetentionPolicy",
+    toWire,
     {
       case "limits"    => Limits
       case "interest"  => Interest
@@ -58,9 +63,9 @@ object StorageType:
   private val toWire: StorageType => String =
     case File   => "file"
     case Memory => "memory"
-  given Encoder[StorageType] = EnumCodec.encoder(toWire)
-  given Decoder[StorageType] = EnumCodec.decoder(
+  given JsonValueCodec[StorageType] = EnumCodec(
     "StorageType",
+    toWire,
     {
       case "file"   => File
       case "memory" => Memory
@@ -74,9 +79,9 @@ object DiscardPolicy:
   private val toWire: DiscardPolicy => String =
     case Old => "old"
     case New => "new"
-  given Encoder[DiscardPolicy] = EnumCodec.encoder(toWire)
-  given Decoder[DiscardPolicy] = EnumCodec.decoder(
+  given JsonValueCodec[DiscardPolicy] = EnumCodec(
     "DiscardPolicy",
+    toWire,
     {
       case "old" => Old
       case "new" => New
@@ -90,9 +95,9 @@ object StoreCompression:
   private val toWire: StoreCompression => String =
     case None => "none"
     case S2   => "s2"
-  given Encoder[StoreCompression] = EnumCodec.encoder(toWire)
-  given Decoder[StoreCompression] = EnumCodec.decoder(
+  given JsonValueCodec[StoreCompression] = EnumCodec(
     "StoreCompression",
+    toWire,
     {
       case "none" => None
       case "s2"   => S2
@@ -110,9 +115,9 @@ object DeliverPolicy:
     case ByStartSequence => "by_start_sequence"
     case ByStartTime     => "by_start_time"
     case LastPerSubject  => "last_per_subject"
-  given Encoder[DeliverPolicy] = EnumCodec.encoder(toWire)
-  given Decoder[DeliverPolicy] = EnumCodec.decoder(
+  given JsonValueCodec[DeliverPolicy] = EnumCodec(
     "DeliverPolicy",
+    toWire,
     {
       case "all"               => All
       case "last"              => Last
@@ -131,9 +136,9 @@ object AckPolicy:
     case None     => "none"
     case All      => "all"
     case Explicit => "explicit"
-  given Encoder[AckPolicy] = EnumCodec.encoder(toWire)
-  given Decoder[AckPolicy] = EnumCodec.decoder(
+  given JsonValueCodec[AckPolicy] = EnumCodec(
     "AckPolicy",
+    toWire,
     {
       case "none"     => None
       case "all"      => All
@@ -148,9 +153,9 @@ object ReplayPolicy:
   private val toWire: ReplayPolicy => String =
     case Instant  => "instant"
     case Original => "original"
-  given Encoder[ReplayPolicy] = EnumCodec.encoder(toWire)
-  given Decoder[ReplayPolicy] = EnumCodec.decoder(
+  given JsonValueCodec[ReplayPolicy] = EnumCodec(
     "ReplayPolicy",
+    toWire,
     {
       case "instant"  => Instant
       case "original" => Original

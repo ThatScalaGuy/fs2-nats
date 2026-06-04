@@ -27,10 +27,8 @@ import fs2.nats.jetstream.protocol.*
 import fs2.nats.protocol.Headers
 import fs2.nats.subscriptions.NatsMessage
 import fs2.nats.util.Tokens
-import io.circe.syntax.*
-import io.circe.{Decoder, Json}
+import com.github.plokhotnyuk.jsoniter_scala.core.*
 
-import java.nio.charset.StandardCharsets.UTF_8
 import scala.concurrent.duration.*
 
 /** Configuration for a JetStream context.
@@ -224,13 +222,13 @@ object JetStream:
     override def addStream(streamConfig: StreamConfig): F[StreamInfo] =
       apiRequest[StreamInfo](
         subjects.streamCreate(streamConfig.name),
-        jsonBody(streamConfig.asJson)
+        jsonBody(streamConfig)
       )
 
     override def updateStream(streamConfig: StreamConfig): F[StreamInfo] =
       apiRequest[StreamInfo](
         subjects.streamUpdate(streamConfig.name),
-        jsonBody(streamConfig.asJson)
+        jsonBody(streamConfig)
       )
 
     override def streamInfo(name: String): F[StreamInfo] =
@@ -248,20 +246,14 @@ object JetStream:
     ): F[PurgeResponse] =
       apiRequest[PurgeResponse](
         subjects.streamPurge(name),
-        jsonBody(
-          JsWire.obj(
-            opts.filter.map("filter" -> Json.fromString(_)),
-            opts.seq.map(s => "seq" -> Json.fromLong(s)),
-            opts.keep.map(k => "keep" -> Json.fromLong(k))
-          )
-        )
+        jsonBody(PurgeRequest(opts.filter, opts.seq, opts.keep))
       )
 
     override def streamNames: Stream[F, String] =
       paginate { offset =>
         apiRequest[StreamNamesResponse](
           subjects.streamNames,
-          jsonBody(Json.obj("offset" -> Json.fromInt(offset)))
+          jsonBody(OffsetRequest(offset))
         ).map(r => (r.streams, r.total))
       }
 
@@ -269,7 +261,7 @@ object JetStream:
       paginate { offset =>
         apiRequest[StreamListResponse](
           subjects.streamList,
-          jsonBody(Json.obj("offset" -> Json.fromInt(offset)))
+          jsonBody(OffsetRequest(offset))
         ).map(r => (r.streams, r.total))
       }
 
@@ -279,9 +271,9 @@ object JetStream:
     ): F[StoredMessage] =
       val body = query match
         case MessageGet.BySeq(seq) =>
-          Json.obj("seq" -> Json.fromLong(seq))
+          MsgGetRequest(seq = Some(seq))
         case MessageGet.LastBySubject(subject) =>
-          Json.obj("last_by_subj" -> Json.fromString(subject))
+          MsgGetRequest(lastBySubj = Some(subject))
       client
         .request(
           subjects.msgGet(stream),
@@ -289,20 +281,16 @@ object JetStream:
           Headers.empty,
           config.timeout
         )
-        .flatMap(reply => decodeField[StoredMessage]("message", reply.payload))
+        .flatMap(reply => decodeMessage(reply.payload))
 
     override def deleteMessage(
         stream: String,
         seq: Long,
         erase: Boolean
     ): F[Unit] =
-      val body = JsWire.obj(
-        Some("seq" -> Json.fromLong(seq)),
-        if erase then None else Some("no_erase" -> Json.fromBoolean(true))
-      )
       apiRequest[SuccessResponse](
         subjects.msgDelete(stream),
-        jsonBody(body)
+        jsonBody(DeleteMsgRequest(seq, noErase = !erase))
       ).void
 
     override def accountInfo: F[AccountInfo] =
@@ -347,7 +335,7 @@ object JetStream:
       paginate { offset =>
         apiRequest[ConsumerNamesResponse](
           subjects.consumerNames(stream),
-          jsonBody(Json.obj("offset" -> Json.fromInt(offset)))
+          jsonBody(OffsetRequest(offset))
         ).map(r => (r.consumers, r.total))
       }
 
@@ -355,7 +343,7 @@ object JetStream:
       paginate { offset =>
         apiRequest[ConsumerListResponse](
           subjects.consumerList(stream),
-          jsonBody(Json.obj("offset" -> Json.fromInt(offset)))
+          jsonBody(OffsetRequest(offset))
         ).map(r => (r.consumers, r.total))
       }
 
@@ -385,13 +373,7 @@ object JetStream:
         cfg: ConsumerConfig,
         action: String
     ): Chunk[Byte] =
-      jsonBody(
-        Json.obj(
-          "stream_name" -> Json.fromString(stream),
-          "config" -> cfg.asJson,
-          "action" -> Json.fromString(action)
-        )
-      )
+      jsonBody(ConsumerCreateRequest(stream, cfg, action))
 
     private def newInbox: F[String] =
       Tokens.randomInboxId[F]().map(id => s"_INBOX.$id")
@@ -604,17 +586,17 @@ object JetStream:
       private def issuePull(inbox: String, req: PullRequest): F[Unit] =
         client.publish(
           nextSubject,
-          jsonBody(req.asJson),
+          jsonBody(req),
           Headers.empty,
           Some(inbox)
         )
 
     // ---- Internal helpers ----
 
-    private def jsonBody(json: Json): Chunk[Byte] =
-      Chunk.array(json.noSpaces.getBytes(UTF_8))
+    private def jsonBody[A](a: A)(using JsonValueCodec[A]): Chunk[Byte] =
+      Chunk.array(writeToArray(a))
 
-    private def apiRequest[A: Decoder](
+    private def apiRequest[A: JsonValueCodec](
         subject: String,
         body: Chunk[Byte]
     ): F[A] =
@@ -623,65 +605,46 @@ object JetStream:
         .flatMap(reply => decode[A](reply.payload))
 
     /** Decode an API response: raise [[NatsError.JetStreamApiError]] when the
-      * payload carries an `error` envelope; otherwise decode `A`.
+      * payload carries an `error` envelope; otherwise decode `A`. The error
+      * envelope is read in a first pass (jsoniter skips the success fields);
+      * `A` is then read from the same bytes.
       */
-    private def decode[A: Decoder](payload: Chunk[Byte]): F[A] =
-      parseJson(payload).flatMap { json =>
-        json.hcursor.downField("error").as[ApiError] match
-          case Right(err) =>
-            F.raiseError(
-              NatsError.JetStreamApiError(
-                err.code,
-                err.errCode,
-                err.description
+    private def decode[A: JsonValueCodec](payload: Chunk[Byte]): F[A] =
+      F.delay(payload.toArray)
+        .flatMap { bytes =>
+          F.delay(readFromArray[ApiErrorEnvelope](bytes).error).flatMap {
+            case Some(err) =>
+              F.raiseError[A](
+                NatsError
+                  .JetStreamApiError(err.code, err.errCode, err.description)
               )
-            )
-          case Left(_) =>
-            json.as[A] match
-              case Right(a) => F.pure(a)
-              case Left(e)  =>
-                F.raiseError(
-                  NatsError.ProtocolParseError(
-                    s"JetStream response decode failed: ${e.getMessage}"
-                  )
-                )
-      }
-
-    /** Like [[decode]] but the success value lives under `field`. */
-    private def decodeField[A: Decoder](
-        field: String,
-        payload: Chunk[Byte]
-    ): F[A] =
-      parseJson(payload).flatMap { json =>
-        json.hcursor.downField("error").as[ApiError] match
-          case Right(err) =>
-            F.raiseError(
-              NatsError.JetStreamApiError(
-                err.code,
-                err.errCode,
-                err.description
-              )
-            )
-          case Left(_) =>
-            json.hcursor.downField(field).as[A] match
-              case Right(a) => F.pure(a)
-              case Left(e)  =>
-                F.raiseError(
-                  NatsError.ProtocolParseError(
-                    s"JetStream response decode failed: ${e.getMessage}"
-                  )
-                )
-      }
-
-    private def parseJson(payload: Chunk[Byte]): F[Json] =
-      io.circe.parser.parse(new String(payload.toArray, UTF_8)) match
-        case Right(json) => F.pure(json)
-        case Left(err)   =>
-          F.raiseError(
-            NatsError.ProtocolParseError(
-              s"Invalid JetStream response JSON: ${err.getMessage}"
-            )
+            case None => F.delay(readFromArray[A](bytes))
+          }
+        }
+        .adaptError { case e: JsonReaderException =>
+          NatsError.ProtocolParseError(
+            s"JetStream response decode failed: ${e.getMessage}"
           )
+        }
+
+    /** Like [[decode]] but the success value lives under `message`. */
+    private def decodeMessage(payload: Chunk[Byte]): F[StoredMessage] =
+      F.delay(payload.toArray)
+        .flatMap { bytes =>
+          F.delay(readFromArray[ApiErrorEnvelope](bytes).error).flatMap {
+            case Some(err) =>
+              F.raiseError[StoredMessage](
+                NatsError
+                  .JetStreamApiError(err.code, err.errCode, err.description)
+              )
+            case None => F.delay(readFromArray[GetMsgResponse](bytes).message)
+          }
+        }
+        .adaptError { case e: JsonReaderException =>
+          NatsError.ProtocolParseError(
+            s"JetStream response decode failed: ${e.getMessage}"
+          )
+        }
 
     /** Lazily page through an offset-paginated API list. */
     private def paginate[A](
