@@ -24,11 +24,48 @@ import fs2.nats.protocol.Headers
 import java.time.Instant
 import scala.concurrent.duration.*
 
-/** Stream configuration. Mirrors the JetStream `StreamConfig` wire model.
-  *
-  * Note: mirror/sources/placement/republish/subject-transform are not modeled
-  * in this MVP; updating a stream that uses them will not preserve those
-  * server-set fields.
+/** A subject transform (`src` → `dest`) applied to a stream or one of its
+  * sources.
+  */
+final case class SubjectTransform(src: String, dest: String)
+object SubjectTransform:
+  given JsonValueCodec[SubjectTransform] = JsonCodecMaker.make(JsWire.snake)
+
+/** Server-side message republishing: copy messages matching `src` onto `dest`
+  * (optionally headers-only).
+  */
+final case class Republish(
+    src: String,
+    dest: String,
+    headersOnly: Boolean = false
+)
+object Republish:
+  given JsonValueCodec[Republish] = JsonCodecMaker.make(JsWire.snake)
+
+/** Stream placement constraints (preferred cluster and/or tags). */
+final case class Placement(
+    cluster: Option[String] = None,
+    tags: List[String] = Nil
+)
+object Placement:
+  given JsonValueCodec[Placement] = JsonCodecMaker.make(JsWire.snake)
+
+/** A stream mirror or source: another stream whose messages this stream copies,
+  * optionally from a start point, filtered, and subject-transformed.
+  */
+final case class StreamSource(
+    name: String,
+    optStartSeq: Option[Long] = None,
+    optStartTime: Option[Instant] = None,
+    filterSubject: Option[String] = None,
+    subjectTransforms: List[SubjectTransform] = Nil
+)
+object StreamSource:
+  given JsonValueCodec[StreamSource] = JsonCodecMaker.make(JsWire.snake)
+
+/** Stream configuration. Mirrors the JetStream `StreamConfig` wire model,
+  * including mirror/sources/republish/subject-transform/placement and the
+  * `sealed` flag.
   */
 final case class StreamConfig(
     name: String,
@@ -49,7 +86,13 @@ final case class StreamConfig(
     allowDirect: Boolean = false,
     allowRollupHdrs: Boolean = false,
     denyDelete: Boolean = false,
-    discardNewPerSubject: Boolean = false
+    discardNewPerSubject: Boolean = false,
+    mirror: Option[StreamSource] = None,
+    sources: List[StreamSource] = Nil,
+    republish: Option[Republish] = None,
+    subjectTransform: Option[SubjectTransform] = None,
+    placement: Option[Placement] = None,
+    sealedStream: Boolean = false
 )
 
 object StreamConfig:
@@ -63,6 +106,10 @@ object StreamConfig:
     private val storageC = summon[JsonValueCodec[StorageType]]
     private val discardC = summon[JsonValueCodec[DiscardPolicy]]
     private val compressionC = summon[JsonValueCodec[StoreCompression]]
+    private val streamSourceC = summon[JsonValueCodec[StreamSource]]
+    private val republishC = summon[JsonValueCodec[Republish]]
+    private val subjectTransformC = summon[JsonValueCodec[SubjectTransform]]
+    private val placementC = summon[JsonValueCodec[Placement]]
 
     def nullValue: StreamConfig = null
 
@@ -102,6 +149,29 @@ object StreamConfig:
       if c.discardNewPerSubject then
         out.writeKey("discard_new_per_subject")
         out.writeVal(true)
+      // Advanced fields: emitted only when set, so a config that uses none of
+      // them serializes byte-identically to before these fields existed.
+      c.mirror.foreach { s =>
+        out.writeKey("mirror"); streamSourceC.encodeValue(s, out)
+      }
+      if c.sources.nonEmpty then
+        out.writeKey("sources")
+        out.writeArrayStart()
+        c.sources.foreach(s => streamSourceC.encodeValue(s, out))
+        out.writeArrayEnd()
+      c.republish.foreach { r =>
+        out.writeKey("republish"); republishC.encodeValue(r, out)
+      }
+      c.subjectTransform.foreach { st =>
+        out.writeKey("subject_transform");
+        subjectTransformC.encodeValue(st, out)
+      }
+      c.placement.foreach { p =>
+        out.writeKey("placement"); placementC.encodeValue(p, out)
+      }
+      if c.sealedStream then
+        out.writeKey("sealed")
+        out.writeVal(true)
       out.writeObjectEnd()
 
     def decodeValue(in: JsonReader, default: StreamConfig): StreamConfig =
@@ -125,6 +195,12 @@ object StreamConfig:
         var allowRollupHdrs = false
         var denyDelete = false
         var discardNewPerSubject = false
+        var mirror: Option[StreamSource] = None
+        var sources: List[StreamSource] = Nil
+        var republish: Option[Republish] = None
+        var subjectTransform: Option[SubjectTransform] = None
+        var placement: Option[Placement] = None
+        var sealedStream = false
         if !in.isNextToken('}') then
           in.rollbackToken()
           var cont = true
@@ -167,6 +243,22 @@ object StreamConfig:
               denyDelete = in.readBoolean()
             else if in.isCharBufEqualsTo(l, "discard_new_per_subject") then
               discardNewPerSubject = in.readBoolean()
+            else if in.isCharBufEqualsTo(l, "mirror") then
+              mirror = Some(
+                streamSourceC.decodeValue(in, streamSourceC.nullValue)
+              )
+            else if in.isCharBufEqualsTo(l, "sources") then
+              sources = JsRead.objectList(in, streamSourceC)
+            else if in.isCharBufEqualsTo(l, "republish") then
+              republish = Some(republishC.decodeValue(in, republishC.nullValue))
+            else if in.isCharBufEqualsTo(l, "subject_transform") then
+              subjectTransform = Some(
+                subjectTransformC.decodeValue(in, subjectTransformC.nullValue)
+              )
+            else if in.isCharBufEqualsTo(l, "placement") then
+              placement = Some(placementC.decodeValue(in, placementC.nullValue))
+            else if in.isCharBufEqualsTo(l, "sealed") then
+              sealedStream = in.readBoolean()
             else in.skip()
             cont = in.isNextToken(',')
           if !in.isCurrentToken('}') then in.objectEndOrCommaError()
@@ -189,7 +281,13 @@ object StreamConfig:
           allowDirect,
           allowRollupHdrs,
           denyDelete,
-          discardNewPerSubject
+          discardNewPerSubject,
+          mirror,
+          sources,
+          republish,
+          subjectTransform,
+          placement,
+          sealedStream
         )
       else in.readNullOrTokenError(default, '{')
 

@@ -71,6 +71,21 @@ private[protocol] object JsRead:
         b.result()
     else in.readNullOrTokenError(Nil, '[')
 
+  /** Read a JSON array of objects via `codec` into a `List`. */
+  def objectList[A](in: JsonReader, codec: JsonValueCodec[A]): List[A] =
+    if in.isNextToken('[') then
+      if in.isNextToken(']') then Nil
+      else
+        in.rollbackToken()
+        val b = List.newBuilder[A]
+        var cont = true
+        while cont do
+          b += codec.decodeValue(in, codec.nullValue)
+          cont = in.isNextToken(',')
+        if !in.isCurrentToken(']') then in.arrayEndOrCommaError()
+        b.result()
+    else in.readNullOrTokenError(Nil, '[')
+
   /** Read a JSON array of int64 nanoseconds into a `List[FiniteDuration]`. */
   def durationListNanos(in: JsonReader): List[FiniteDuration] =
     if in.isNextToken('[') then

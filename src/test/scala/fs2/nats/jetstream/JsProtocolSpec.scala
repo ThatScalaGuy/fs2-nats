@@ -109,6 +109,51 @@ class JsProtocolSpec extends FunSuite:
     assertEquals(readFromString[StreamConfig](json), cfg)
   }
 
+  test("StreamConfig omits the advanced fields by default (byte-stability)") {
+    val json = writeToString(StreamConfig("S"))
+    assert(!json.contains("mirror"), clue = json)
+    assert(!json.contains("\"sources\""), clue = json)
+    assert(!json.contains("republish"), clue = json)
+    assert(!json.contains("subject_transform"), clue = json)
+    assert(!json.contains("placement"), clue = json)
+    assert(!json.contains("\"sealed\""), clue = json)
+  }
+
+  test("StreamConfig emits the advanced fields when set and round-trips") {
+    val cfg = StreamConfig(
+      name = "AGG",
+      subjects = List("agg.>"),
+      mirror = Some(
+        StreamSource(
+          "SRC",
+          optStartSeq = Some(10L),
+          filterSubject = Some("a.>")
+        )
+      ),
+      sources = List(
+        StreamSource("S1"),
+        StreamSource(
+          "S2",
+          subjectTransforms = List(SubjectTransform("x.>", "y.>"))
+        )
+      ),
+      republish = Some(Republish("agg.>", "out.>", headersOnly = true)),
+      subjectTransform = Some(SubjectTransform("in.>", "agg.>")),
+      placement =
+        Some(Placement(cluster = Some("c1"), tags = List("ssd", "fast"))),
+      sealedStream = true
+    )
+    val json = writeToString(cfg)
+    assert(json.contains("\"mirror\""), clue = json)
+    assert(json.contains("\"sources\""), clue = json)
+    assert(json.contains("\"subject_transforms\""), clue = json)
+    assert(json.contains("\"republish\""), clue = json)
+    assert(json.contains("\"subject_transform\""), clue = json)
+    assert(json.contains("\"placement\""), clue = json)
+    assert(json.contains("\"sealed\":true"), clue = json)
+    assertEquals(readFromString[StreamConfig](json), cfg)
+  }
+
   test("PubAck decodes including duplicate flag") {
     assertEquals(
       readFromString[PubAck](
