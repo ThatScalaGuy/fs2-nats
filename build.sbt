@@ -103,6 +103,35 @@ lazy val root = project
       ),
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "fs2.nats.subscriptions.NatsMessage.this"
+      ),
+      // KV: adds the key-value factory/management methods to the JetStream
+      // trait. Additive abstract methods MiMa flags as binary-incompatible.
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.createKeyValue"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.keyValue"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.deleteKeyValue"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.keyValueStatus"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.keyValueNames"
+      ),
+      // KV: StreamConfig gains the allow_rollup_hdrs / deny_delete /
+      // discard_new_per_subject flags (defaulted false). New case-class fields
+      // change the synthesized apply/copy/constructor signatures.
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.jetstream.protocol.StreamConfig.apply"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.jetstream.protocol.StreamConfig.copy"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.jetstream.protocol.StreamConfig.this"
       )
     )
   )

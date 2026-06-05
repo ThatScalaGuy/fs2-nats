@@ -8,6 +8,7 @@ A functional, streaming NATS client for Scala 3, built on [FS2](https://fs2.io/)
 - **Streaming first** - Native FS2 streams for message handling
 - **Request/Reply** - Shared-inbox request primitive with no-responders fast-fail
 - **JetStream** - Streams, consumers, persistent publish (PubAck), pull & push consume with full ack semantics
+- **Key-Value** - Buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch
 - **Headers support** - Full NATS 2.2+ headers support (HPUB/HMSG)
 - **Backpressure** - Configurable slow consumer policies
 - **Reconnection** - Exponential backoff with full jitter
@@ -204,6 +205,57 @@ repeatable.
 subscription replay on reconnect; the pull `consume` loop additionally re-issues
 its request on a cadence so it resumes after a dropped connection.
 
+## Key-Value Store
+
+A Key-Value bucket is an opinionated JetStream stream (`KV_<bucket>`, subjects
+`$KV.<bucket>.>`). KV handles are obtained from the JetStream context. Reads use
+JetStream **Direct Get** when the bucket allows it (`allow_direct`, the default),
+so a `get` returns the raw message payload with no JSON/base64 decoding on the
+hot path; writes ride the JetStream publish/coalescing window.
+
+```scala
+import fs2.nats.kv.*
+
+client.jetStream().use { js =>
+  for
+    // Create a bucket keeping the last 5 revisions of each key
+    kv   <- js.createKeyValue(KvConfig(bucket = "config", history = 5))
+
+    // Put returns the new revision (the entry's stream sequence)
+    rev  <- kv.put("db.url", Chunk.array("postgres://localhost".getBytes))
+    cur  <- kv.get("db.url")                 // Option[KvEntry] (Direct Get)
+
+    // Optimistic concurrency: only writes if the revision still matches
+    rev2 <- kv.update("db.url", Chunk.array("postgres://prod".getBytes), rev)
+
+    // create fails if the key exists; delete writes a tombstone, purge
+    // collapses a key's history
+    _    <- kv.delete("legacy")
+    keys <- kv.keys.compile.toList           // live keys (excludes deletes)
+  yield ()
+}
+```
+
+Watch the snapshot and live updates. The stream delivers the current entries,
+then a single `KvWatchEvent.EndOfData` marker, then live changes:
+
+```scala
+kv.watch(">").use { stream =>
+  stream.evalMap {
+    case KvWatchEvent.Entry(e)  => onChange(e.key, e.value, e.operation)
+    case KvWatchEvent.EndOfData => IO.println("caught up")
+  }.compile.drain
+}
+```
+
+Bucket management lives on the JetStream context: `createKeyValue`, `keyValue`
+(bind to an existing bucket), `deleteKeyValue`, `keyValueStatus`, and
+`keyValueNames`. `create`/`update` raise `NatsError.KeyValueWrongLastSequence`
+when their optimistic-concurrency precondition fails.
+
+**Limitation:** the `keys`/`history`/`watch` consumer is not a gap-resetting
+ordered consumer, so a reconnect mid-watch may miss updates.
+
 ## Configuration
 
 ### ClientConfig
@@ -327,6 +379,7 @@ See the `examples/` directory for complete examples:
 - `RequestReplyExample` - Request/reply pattern
 - `QueueGroupExample` - Load-balanced workers
 - `JetStreamExample.scala` - Streams, persistent publish, and pull consumption (requires `-js`)
+- `KeyValueExample.scala` - Key-Value buckets: put/get, optimistic concurrency, keys, and watch (requires `-js`)
 
 Run examples:
 

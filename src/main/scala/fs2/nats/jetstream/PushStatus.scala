@@ -17,7 +17,7 @@
 package fs2.nats.jetstream
 
 /** Classification of a push-delivery message based on its status line. */
-private[jetstream] enum PushSignal:
+private[nats] enum PushSignal:
   /** A normal data message. */
   case Data
 
@@ -30,7 +30,7 @@ private[jetstream] enum PushSignal:
   /** The consumer is invalid (e.g. deleted); fail the stream. */
   case Fail(code: Int, description: String)
 
-private[jetstream] object PushStatus:
+private[nats] object PushStatus:
 
   /** Classify a push delivery. A 100 with a non-empty reply is flow control; a
     * 100 without a reply is an idle heartbeat; any other status fails the

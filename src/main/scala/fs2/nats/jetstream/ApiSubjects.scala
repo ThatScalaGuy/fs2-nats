@@ -36,6 +36,13 @@ final class ApiSubjects(val prefix: String):
   def msgGet(name: String): String = s"${prefix}STREAM.MSG.GET.$name"
   def msgDelete(name: String): String = s"${prefix}STREAM.MSG.DELETE.$name"
 
+  /** Direct-get endpoint (`DIRECT.GET.<stream>`); body selects the message. */
+  def directGet(name: String): String = s"${prefix}DIRECT.GET.$name"
+
+  /** Direct-get-last-by-subject convenience endpoint (no request body). */
+  def directGetLastBySubject(name: String, subject: String): String =
+    s"${prefix}DIRECT.GET.$name.$subject"
+
   // ---- Consumers ----
   def consumerCreate(stream: String, consumer: String): String =
     s"${prefix}CONSUMER.CREATE.$stream.$consumer"

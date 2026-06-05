@@ -24,6 +24,7 @@ import fs2.{Chunk, Stream}
 import fs2.nats.client.NatsClient
 import fs2.nats.errors.NatsError
 import fs2.nats.jetstream.protocol.*
+import fs2.nats.kv.{KeyValue, KvConfig, KvImpl, KvNames, KvStatus}
 import fs2.nats.protocol.Headers
 import fs2.nats.subscriptions.NatsMessage
 import fs2.nats.util.Tokens
@@ -139,6 +140,23 @@ trait JetStream[F[_]]:
       stream: String,
       config: ConsumerConfig
   ): Resource[F, Stream[F, JsMessage[F]]]
+
+  // ---- Key-Value ----
+
+  /** Create a KV bucket (and its backing stream) and return a handle. */
+  def createKeyValue(config: KvConfig): F[KeyValue[F]]
+
+  /** Bind to an existing KV bucket (verifies its backing stream exists). */
+  def keyValue(bucket: String): F[KeyValue[F]]
+
+  /** Delete a KV bucket and all its data. */
+  def deleteKeyValue(bucket: String): F[Unit]
+
+  /** Fetch the status of a KV bucket. */
+  def keyValueStatus(bucket: String): F[KvStatus]
+
+  /** Stream the names of all KV buckets on the server. */
+  def keyValueNames: Stream[F, String]
 
 object JetStream:
 
@@ -402,6 +420,27 @@ object JetStream:
         )
         delivery <- client.subscribe(deliverSubject, effective.deliverGroup)
       yield delivery.evalMapFilter(handlePushMessage)
+
+    // ---- Key-Value ----
+
+    override def createKeyValue(kvConfig: KvConfig): F[KeyValue[F]] =
+      KvImpl.create(this, client, subjects, config, kvConfig)
+
+    override def keyValue(bucket: String): F[KeyValue[F]] =
+      KvImpl.bind(this, client, subjects, config, bucket)
+
+    override def deleteKeyValue(bucket: String): F[Unit] =
+      F.fromEither(
+        KvNames
+          .validateBucket(bucket)
+          .leftMap(msg => NatsError.InvalidSubject(bucket, msg))
+      ) *> deleteStream(KvNames.streamName(bucket))
+
+    override def keyValueStatus(bucket: String): F[KvStatus] =
+      streamInfo(KvNames.streamName(bucket)).map(KvStatus.from(bucket, _))
+
+    override def keyValueNames: Stream[F, String] =
+      streamNames.map(KvNames.bucketFromStream).unNone
 
     private def handlePushMessage(m: NatsMessage): F[Option[JsMessage[F]]] =
       PushStatus.classify(m.status, m.replyTo, m.statusDescription) match

@@ -46,7 +46,10 @@ final case class StreamConfig(
     duplicateWindow: Option[FiniteDuration] = None,
     description: Option[String] = None,
     compression: StoreCompression = StoreCompression.None,
-    allowDirect: Boolean = false
+    allowDirect: Boolean = false,
+    allowRollupHdrs: Boolean = false,
+    denyDelete: Boolean = false,
+    discardNewPerSubject: Boolean = false
 )
 
 object StreamConfig:
@@ -88,6 +91,17 @@ object StreamConfig:
       }
       out.writeKey("compression"); compressionC.encodeValue(c.compression, out)
       out.writeKey("allow_direct"); out.writeVal(c.allowDirect)
+      // Emit the KV-related flags only when set, so non-KV streams serialize
+      // byte-identically to before these fields existed.
+      if c.allowRollupHdrs then
+        out.writeKey("allow_rollup_hdrs")
+        out.writeVal(true)
+      if c.denyDelete then
+        out.writeKey("deny_delete")
+        out.writeVal(true)
+      if c.discardNewPerSubject then
+        out.writeKey("discard_new_per_subject")
+        out.writeVal(true)
       out.writeObjectEnd()
 
     def decodeValue(in: JsonReader, default: StreamConfig): StreamConfig =
@@ -108,6 +122,9 @@ object StreamConfig:
         var description: Option[String] = None
         var compression = StoreCompression.None
         var allowDirect = false
+        var allowRollupHdrs = false
+        var denyDelete = false
+        var discardNewPerSubject = false
         if !in.isNextToken('}') then
           in.rollbackToken()
           var cont = true
@@ -144,6 +161,12 @@ object StreamConfig:
               compression = compressionC.decodeValue(in, compression)
             else if in.isCharBufEqualsTo(l, "allow_direct") then
               allowDirect = in.readBoolean()
+            else if in.isCharBufEqualsTo(l, "allow_rollup_hdrs") then
+              allowRollupHdrs = in.readBoolean()
+            else if in.isCharBufEqualsTo(l, "deny_delete") then
+              denyDelete = in.readBoolean()
+            else if in.isCharBufEqualsTo(l, "discard_new_per_subject") then
+              discardNewPerSubject = in.readBoolean()
             else in.skip()
             cont = in.isNextToken(',')
           if !in.isCurrentToken('}') then in.objectEndOrCommaError()
@@ -163,7 +186,10 @@ object StreamConfig:
           duplicateWindow,
           description,
           compression,
-          allowDirect
+          allowDirect,
+          allowRollupHdrs,
+          denyDelete,
+          discardNewPerSubject
         )
       else in.readNullOrTokenError(default, '{')
 
