@@ -121,6 +121,11 @@ lazy val root = project
       ProblemFilters.exclude[ReversedMissingMethodProblem](
         "fs2.nats.jetstream.JetStream.keyValueNames"
       ),
+      // Ordered consumer: adds the `subscribeOrdered` factory to the JetStream
+      // trait (additive abstract method).
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.subscribeOrdered"
+      ),
       // KV: StreamConfig gains the allow_rollup_hdrs / deny_delete /
       // discard_new_per_subject flags (defaulted false). New case-class fields
       // change the synthesized apply/copy/constructor signatures.
