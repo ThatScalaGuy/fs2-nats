@@ -199,3 +199,48 @@ object NatsError:
       extends NatsError(
         s"Wrong last sequence for key '$key' (expected revision $expected)"
       )
+
+  /** An object's stored SHA-256 digest did not match the bytes read back.
+    *
+    * @param name
+    *   The object name
+    * @param expected
+    *   The digest recorded in the object's meta
+    * @param actual
+    *   The digest computed over the streamed chunks
+    */
+  final case class ObjectDigestMismatch(
+      name: String,
+      expected: String,
+      actual: String
+  ) extends NatsError(
+        s"Object '$name' digest mismatch: expected $expected, got $actual"
+      )
+
+  /** An Object Store operation referenced an object that does not exist (or is
+    * deleted).
+    *
+    * @param bucket
+    *   The bucket searched
+    * @param name
+    *   The object name
+    */
+  final case class ObjectNotFound(bucket: String, name: String)
+      extends NatsError(s"Object '$name' not found in bucket '$bucket'")
+
+  /** An operation required a real object but found a link (e.g. linking to a
+    * link), or vice versa.
+    *
+    * @param name
+    *   The object name that is a link
+    */
+  final case class ObjectIsLink(name: String)
+      extends NatsError(s"Object '$name' is a link")
+
+  /** A rename/link target name is already taken by a live object.
+    *
+    * @param name
+    *   The target object name
+    */
+  final case class ObjectAlreadyExists(name: String)
+      extends NatsError(s"Object '$name' already exists")

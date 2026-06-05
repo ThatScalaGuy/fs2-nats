@@ -9,6 +9,7 @@ A functional, streaming NATS client for Scala 3, built on [FS2](https://fs2.io/)
 - **Request/Reply** - Shared-inbox request primitive with no-responders fast-fail
 - **JetStream** - Streams, consumers, persistent publish (PubAck), pull & push consume with full ack semantics
 - **Key-Value** - Buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch
+- **Object Store** - Large binary objects chunked over JetStream with streaming put/get, SHA-256 verification, links, and watch
 - **Headers support** - Full NATS 2.2+ headers support (HPUB/HMSG)
 - **Backpressure** - Configurable slow consumer policies
 - **Reconnection** - Exponential backoff with full jitter
@@ -253,8 +254,55 @@ Bucket management lives on the JetStream context: `createKeyValue`, `keyValue`
 `keyValueNames`. `create`/`update` raise `NatsError.KeyValueWrongLastSequence`
 when their optimistic-concurrency precondition fails.
 
-**Limitation:** the `keys`/`history`/`watch` consumer is not a gap-resetting
-ordered consumer, so a reconnect mid-watch may miss updates.
+`keys`/`history`/`watch` stream from a gap-resetting **ordered consumer**, so a
+reconnect mid-watch recovers in order rather than missing updates.
+
+## Object Store
+
+An Object Store bucket is an opinionated JetStream stream (`OBJ_<bucket>`,
+subjects `$O.<bucket>.C.>` for chunks and `$O.<bucket>.M.>` for per-object
+meta). It stores arbitrarily large binary objects by chunking them across the
+stream, with a rolled-up meta message recording each object's size, chunk count,
+and SHA-256 digest. Both `put` and `get` are fully streaming — neither
+materializes a whole object in memory.
+
+```scala
+import fs2.nats.objectstore.*
+
+client.jetStream().use { js =>
+  for
+    os <- js.createObjectStore(ObjConfig(bucket = "assets"))
+
+    // Stream bytes in (here from a file); chunks are pipelined through the
+    // publish window and coalesced into socket writes. Nothing is buffered whole.
+    info <- os.put(
+      ObjectMeta("logo.png", maxChunkSize = 128 * 1024),
+      fs2.io.file.Files[IO].readAll(fs2.io.file.Path("logo.png"))
+    )
+
+    // Stream bytes out; the SHA-256 digest is verified once all chunks are read.
+    _ <- os.get("logo.png").flatMap {
+      case Some(r) => r.data.through(sink).compile.drain
+      case None    => IO.unit
+    }
+
+    // Convenience for small objects and files
+    _   <- os.putBytes(ObjectMeta("readme.txt"), Chunk.array("hi".getBytes))
+    txt <- os.getBytes("readme.txt")              // Option[Chunk[Byte]]
+    _   <- os.putFile("backup.tar", fs2.io.file.Path("backup.tar"))
+    _   <- os.getToFile("backup.tar", fs2.io.file.Path("restored.tar"))
+  yield ()
+}
+```
+
+Objects support links (`addLink`/`addBucketLink`, transparently resolved on
+`get`/`info`), metadata updates and `rename` (no re-upload), `delete`, `list`,
+`watch` (snapshot + `EndOfData` + live updates), and `seal` (make the bucket
+read-only). Reads of object meta use the JetStream **Direct Get** fast path when
+the bucket allows it; chunk reads use the gap-resetting ordered consumer, so a
+`get` recovers in order across a reconnect. Bucket management lives on the
+JetStream context: `createObjectStore`, `objectStore`, `deleteObjectStore`,
+`objectStoreStatus`, `objectStoreNames`.
 
 ## Configuration
 
@@ -380,6 +428,7 @@ See the `examples/` directory for complete examples:
 - `QueueGroupExample` - Load-balanced workers
 - `JetStreamExample.scala` - Streams, persistent publish, and pull consumption (requires `-js`)
 - `KeyValueExample.scala` - Key-Value buckets: put/get, optimistic concurrency, keys, and watch (requires `-js`)
+- `ObjectStoreExample.scala` - Object Store: streaming put/get, links, list, watch, and seal (requires `-js`)
 
 Run examples:
 
