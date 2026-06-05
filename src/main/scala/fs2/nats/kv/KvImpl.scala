@@ -26,22 +26,14 @@ import fs2.nats.jetstream.{
   ApiSubjects,
   JetStream,
   JetStreamConfig,
-  JsAckParser,
-  PublishOptions,
-  PushSignal,
-  PushStatus
+  JsMessage,
+  OrderedConsumerOptions,
+  PublishOptions
 }
-import fs2.nats.jetstream.protocol.{
-  AckPolicy,
-  ConsumerConfig,
-  DeliverPolicy,
-  MessageGet,
-  StoredMessage
-}
+import fs2.nats.jetstream.protocol.{DeliverPolicy, MessageGet, StoredMessage}
 import fs2.nats.kv.protocol.{DirectGetRequest, KvHeaders}
 import fs2.nats.protocol.Headers
 import fs2.nats.subscriptions.NatsMessage
-import fs2.nats.util.Tokens
 
 import java.time.Instant
 import scala.concurrent.duration.*
@@ -297,7 +289,7 @@ private[nats] object KvImpl:
 
     private def watchStream(
         pending: Long,
-        msgs: Stream[F, NatsMessage],
+        msgs: Stream[F, JsMessage[F]],
         opts: WatchOptions
     ): Stream[F, KvWatchEvent] =
       if pending == 0 then
@@ -312,7 +304,7 @@ private[nats] object KvImpl:
         }
 
     private def toEvent(opts: WatchOptions)(
-        m: NatsMessage
+        m: JsMessage[F]
     ): Option[KvWatchEvent] =
       val entry = buildEntry(KvNames.keyFromSubject(bucket, m.subject), m)
       if opts.ignoreDeletes && entry.operation != KvOperation.Put then None
@@ -323,47 +315,27 @@ private[nats] object KvImpl:
       else if opts.includeHistory then DeliverPolicy.All
       else DeliverPolicy.LastPerSubject
 
-    /** Create an ephemeral push consumer over `filter` and stream its raw
+    /** Create an ephemeral ordered push consumer over `filter` and stream its
       * deliveries, returning the snapshot size (`numPending` at creation) so
-      * the caller can detect "caught up". Heartbeats are dropped and
-      * flow-control is answered; the consumer is deleted on release.
+      * the caller can detect "caught up". The ordered consumer drops
+      * heartbeats, answers flow-control, and gap-resets on a missed delivery or
+      * reconnect; it is deleted on release.
       */
     private def kvConsume(
         filter: String,
         deliverPolicy: DeliverPolicy,
         headersOnly: Boolean
-    ): Resource[F, (Long, Stream[F, NatsMessage])] =
-      for
-        inbox <- Resource.eval(
-          Tokens.randomInboxId[F]().map(id => s"_INBOX.$id")
+    ): Resource[F, (Long, Stream[F, JsMessage[F]])] =
+      js.subscribeOrderedWithInfo(
+        stream,
+        Some(filter),
+        OrderedConsumerOptions(
+          deliverPolicy = deliverPolicy,
+          headersOnly = headersOnly,
+          idleHeartbeat = WatchHeartbeat,
+          inactiveThreshold = 5.minutes
         )
-        // Subscribe before creating the consumer so no early delivery is missed.
-        raw <- client.subscribe(inbox)
-        info <- Resource.make(
-          js.addConsumer(
-            stream,
-            ConsumerConfig(
-              deliverPolicy = deliverPolicy,
-              ackPolicy = AckPolicy.None,
-              filterSubject = Some(filter),
-              headersOnly = headersOnly,
-              deliverSubject = Some(inbox),
-              flowControl = true,
-              idleHeartbeat = Some(WatchHeartbeat),
-              inactiveThreshold = Some(5.minutes)
-            )
-          )
-        )(info => js.deleteConsumer(stream, info.name).attempt.void)
-      yield (info.numPending, raw.evalMapFilter(classify))
-
-    private def classify(m: NatsMessage): F[Option[NatsMessage]] =
-      PushStatus.classify(m.status, m.replyTo, m.statusDescription) match
-        case PushSignal.Data               => F.pure(Some(m))
-        case PushSignal.Heartbeat          => F.pure(None)
-        case PushSignal.FlowControl(reply) =>
-          client.publish(reply, Chunk.empty).as(None)
-        case PushSignal.Fail(code, desc) =>
-          F.raiseError(NatsError.JetStreamApiError(code, 0, desc))
+      ).map { case (info, msgs) => (info.numPending, msgs) }
 
     // ---- Shared parsing ----
 
@@ -397,22 +369,15 @@ private[nats] object KvImpl:
           )
         case _ => None
 
-    private def buildEntry(key: String, m: NatsMessage): KvEntry =
-      val reply = m.replyTo.getOrElse("")
-      val (revision, created, delta) =
-        if reply.startsWith("$JS.ACK") then
-          JsAckParser.parse(reply) match
-            case Right(meta) =>
-              (meta.streamSeq, meta.timestamp, meta.numPending)
-            case Left(_) => (0L, Instant.EPOCH, 0L)
-        else (0L, Instant.EPOCH, 0L)
+    private def buildEntry(key: String, m: JsMessage[F]): KvEntry =
+      val meta = m.metadata
       KvEntry(
         bucket,
         key,
         m.payload,
-        revision,
-        created,
-        delta,
+        meta.streamSeq,
+        meta.timestamp,
+        meta.numPending,
         operation(m.headers)
       )
 

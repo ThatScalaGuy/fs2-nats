@@ -106,10 +106,8 @@ object KvStatus:
   * raw message payload — no JSON/base64 on the hot path), falling back to
   * `STREAM.MSG.GET` otherwise. Writes go through the JetStream publish path and
   * its coalesced write/pipeline window. `keys`/`history`/`watch` stream from an
-  * ephemeral consumer the handle creates and cleans up.
-  *
-  * Note: the watch/enumeration consumer is not a gap-resetting ordered
-  * consumer; on a reconnect mid-watch some updates may be missed.
+  * ephemeral, gap-resetting ordered consumer the handle creates and cleans up;
+  * it recovers in-order across a reconnect mid-watch.
   */
 trait KeyValue[F[_]]:
 
