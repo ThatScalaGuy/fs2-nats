@@ -24,9 +24,9 @@ import scala.concurrent.duration.*
 
 /** Integration tests for NKey (Ed25519) authentication.
   *
-  * These require the dedicated nkey-authenticated broker, which is configured to
-  * accept exactly one user (the public key derived from `AuthorizedSeed`). Start
-  * it with:
+  * These require the dedicated nkey-authenticated broker, which is configured
+  * to accept exactly one user (the public key derived from `AuthorizedSeed`).
+  * Start it with:
   *
   * docker compose up -d nats-nkey
   *

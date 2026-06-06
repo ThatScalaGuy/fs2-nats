@@ -125,7 +125,10 @@ class ObjectStoreIntegrationSpec extends CatsEffectSuite:
     val b = uniqueBucket
     withObj(b) { (_, os) =>
       for
-        _ <- os.put(ObjectMeta("k", maxChunkSize = 1024), Stream.chunk(bytes(5000)))
+        _ <- os.put(
+          ObjectMeta("k", maxChunkSize = 1024),
+          Stream.chunk(bytes(5000))
+        )
         info2 <- os.putBytes(ObjectMeta("k"), bytes(300))
         got <- os.getBytes("k")
         st <- os.status
@@ -180,8 +183,8 @@ class ObjectStoreIntegrationSpec extends CatsEffectSuite:
           yield evs
         }
       yield
-        val updates = events.collect {
-          case ObjectWatchEvent.Update(i) => i.name
+        val updates = events.collect { case ObjectWatchEvent.Update(i) =>
+          i.name
         }
         val endIdx = events.indexOf(ObjectWatchEvent.EndOfData)
         assert(endIdx >= 0, clue = events)
