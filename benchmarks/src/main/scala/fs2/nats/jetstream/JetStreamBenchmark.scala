@@ -67,27 +67,31 @@ class JetStreamBenchmark:
     """{"stream":"ORDERS","seq":12345,"domain":"hub"}""".getBytes(UTF_8)
 
   private val infoJson =
-    """{"server_id":"NABC","server_name":"n1","version":"2.10.0","proto":1,"go":"go1.21","host":"0.0.0.0","port":4222,"headers":true,"max_payload":1048576,"client_id":5,"jetstream":true,"connect_urls":["10.0.0.1:4222","10.0.0.2:4222"]}""".getBytes(
-      UTF_8
-    )
+    """{"server_id":"NABC","server_name":"n1","version":"2.10.0","proto":1,"go":"go1.21","host":"0.0.0.0","port":4222,"headers":true,"max_payload":1048576,"client_id":5,"jetstream":true,"connect_urls":["10.0.0.1:4222","10.0.0.2:4222"]}"""
+      .getBytes(
+        UTF_8
+      )
 
   private val streamInfoJson =
-    """{"config":{"name":"ORDERS","subjects":["orders.*"],"retention":"limits","storage":"file","max_consumers":-1,"max_msgs":-1,"max_bytes":-1,"max_msg_size":-1,"max_msgs_per_subject":-1,"num_replicas":1,"discard":"old","compression":"none","allow_direct":false},"state":{"messages":1000,"bytes":204800,"first_seq":1,"last_seq":1000,"consumer_count":3},"created":"2024-01-15T10:30:00Z"}""".getBytes(
-      UTF_8
-    )
+    """{"config":{"name":"ORDERS","subjects":["orders.*"],"retention":"limits","storage":"file","max_consumers":-1,"max_msgs":-1,"max_bytes":-1,"max_msg_size":-1,"max_msgs_per_subject":-1,"num_replicas":1,"discard":"old","compression":"none","allow_direct":false},"state":{"messages":1000,"bytes":204800,"first_seq":1,"last_seq":1000,"consumer_count":3},"created":"2024-01-15T10:30:00Z"}"""
+      .getBytes(
+        UTF_8
+      )
 
   private val consumerInfoJson =
-    """{"stream_name":"ORDERS","name":"workers","created":"2024-01-15T10:30:00Z","config":{"durable_name":"workers","ack_policy":"explicit","deliver_policy":"all","replay_policy":"instant","ack_wait":30000000000,"max_deliver":5},"delivered":{"consumer_seq":100,"stream_seq":500},"ack_floor":{"consumer_seq":99,"stream_seq":499},"num_pending":50,"num_ack_pending":1,"num_redelivered":0,"num_waiting":0}""".getBytes(
-      UTF_8
-    )
+    """{"stream_name":"ORDERS","name":"workers","created":"2024-01-15T10:30:00Z","config":{"durable_name":"workers","ack_policy":"explicit","deliver_policy":"all","replay_policy":"instant","ack_wait":30000000000,"max_deliver":5},"delivered":{"consumer_seq":100,"stream_seq":500},"ack_floor":{"consumer_seq":99,"stream_seq":499},"num_pending":50,"num_ack_pending":1,"num_redelivered":0,"num_waiting":0}"""
+      .getBytes(
+        UTF_8
+      )
 
   private val storedMessageJson =
     val data = Base64.getEncoder.encodeToString("hello world".getBytes(UTF_8))
     val hdrs = Base64.getEncoder
       .encodeToString("NATS/1.0\r\nX-Order: 42\r\n\r\n".getBytes(UTF_8))
-    s"""{"subject":"ORDERS.new","seq":42,"hdrs":"$hdrs","data":"$data","time":"2024-01-15T10:30:00.123456789Z"}""".getBytes(
-      UTF_8
-    )
+    s"""{"subject":"ORDERS.new","seq":42,"hdrs":"$hdrs","data":"$data","time":"2024-01-15T10:30:00.123456789Z"}"""
+      .getBytes(
+        UTF_8
+      )
 
   @Benchmark
   def decodePubAck(): PubAck =

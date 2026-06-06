@@ -66,9 +66,14 @@ object ObjectStoreExample extends IOApp:
           _ <- IO.println(s"get logo.bin -> streamed $count bytes back")
 
           // 4. Small objects: putBytes / getBytes convenience.
-          _ <- os.putBytes(ObjectMeta("readme.txt"), Chunk.array("hello".getBytes))
+          _ <- os.putBytes(
+            ObjectMeta("readme.txt"),
+            Chunk.array("hello".getBytes)
+          )
           txt <- os.getBytes("readme.txt")
-          _ <- IO.println(s"readme.txt -> ${txt.map(c => new String(c.toArray))}")
+          _ <- IO.println(
+            s"readme.txt -> ${txt.map(c => new String(c.toArray))}"
+          )
 
           // 5. A link that transparently resolves to another object.
           _ <- os.addLink("logo-latest", info)
