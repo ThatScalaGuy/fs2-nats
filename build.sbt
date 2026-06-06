@@ -2,12 +2,12 @@ import com.typesafe.tools.mima.core.*
 
 lazy val V = new {
   val scala3 = "3.3.7"
-  val catsEffect = "3.6.3"
-  val fs2 = "3.12.2"
+  val catsEffect = "3.7.0"
+  val fs2 = "3.13.0"
   val jsoniter = "2.38.14"
   val bouncyCastle = "1.84"
   val munit = "1.2.4"
-  val munitCatsEffect = "2.1.0"
+  val munitCatsEffect = "2.2.0"
   val scalaCheck = "1.19.0"
   val munitScalaCheck = "1.3.0"
 }

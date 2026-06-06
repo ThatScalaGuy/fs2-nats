@@ -58,7 +58,7 @@ object NatsSocket:
       parserConfig: ParserConfig = ParserConfig.default
   ): Resource[F, Transport[F]] =
     for
-      socket <- Network[F].client(address)
+      socket <- Network[F].connect(address)
       transport <- fromSocket(socket, config, parserConfig)
     yield transport
 
