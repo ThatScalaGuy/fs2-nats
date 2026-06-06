@@ -30,6 +30,7 @@ import fs2.nats.subscriptions.NatsMessage
 import fs2.nats.util.Tokens
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 
+import java.time.Instant
 import scala.concurrent.duration.*
 
 /** Configuration for a JetStream context.
@@ -140,6 +141,33 @@ trait JetStream[F[_]]:
       stream: String,
       config: ConsumerConfig
   ): Resource[F, Stream[F, JsMessage[F]]]
+
+  // ---- Ordered consume ----
+
+  /** Subscribe to a stream via a gap-resetting ordered push consumer over an
+    * optional `filterSubject`. The delivery is gap-free and in-order even
+    * across reconnects: the client tracks the per-consumer delivery sequence
+    * and transparently recreates the (ephemeral, no-ack, flow-controlled)
+    * consumer from the last in-order stream sequence on any detected gap or
+    * server-side invalidation. The `Resource` deletes the consumer on release.
+    * Idle heartbeats are filtered and flow-control requests answered
+    * automatically.
+    */
+  def subscribeOrdered(
+      stream: String,
+      filterSubject: Option[String] = None,
+      opts: OrderedConsumerOptions = OrderedConsumerOptions.default
+  ): Resource[F, Stream[F, JsMessage[F]]]
+
+  /** Like [[subscribeOrdered]] but also yields the initial [[ConsumerInfo]]
+    * (e.g. for its `numPending` snapshot size). Internal: used by the KV and
+    * Object Store enumeration/watch paths.
+    */
+  private[nats] def subscribeOrderedWithInfo(
+      stream: String,
+      filterSubject: Option[String],
+      opts: OrderedConsumerOptions
+  ): Resource[F, (ConsumerInfo, Stream[F, JsMessage[F]])]
 
   // ---- Key-Value ----
 
@@ -420,6 +448,163 @@ object JetStream:
         )
         delivery <- client.subscribe(deliverSubject, effective.deliverGroup)
       yield delivery.evalMapFilter(handlePushMessage)
+
+    // ---- Ordered consume ----
+
+    override def subscribeOrdered(
+        stream: String,
+        filterSubject: Option[String],
+        opts: OrderedConsumerOptions
+    ): Resource[F, Stream[F, JsMessage[F]]] =
+      subscribeOrderedWithInfo(stream, filterSubject, opts).map(_._2)
+
+    private[nats] override def subscribeOrderedWithInfo(
+        stream: String,
+        filterSubject: Option[String],
+        opts: OrderedConsumerOptions
+    ): Resource[F, (ConsumerInfo, Stream[F, JsMessage[F]])] =
+      for
+        inbox <- Resource.eval(newInbox)
+        // Subscribe before creating the consumer so no early delivery is lost.
+        delivery <- client.subscribe(inbox)
+        state <- Resource.eval(
+          Ref.of[F, OrderedState](OrderedState(1L, 0L, 0L))
+        )
+        nameRef <- Resource.eval(Ref.of[F, String](""))
+        now0 <- Resource.eval(F.monotonic)
+        lastSeen <- Resource.eval(Ref.of[F, FiniteDuration](now0))
+        first <- Resource.make(
+          addConsumer(
+            stream,
+            orderedConfig(
+              filterSubject,
+              opts,
+              inbox,
+              opts.deliverPolicy,
+              opts.optStartSeq,
+              opts.optStartTime
+            )
+          ).flatTap(info => nameRef.set(info.name))
+        )(_ =>
+          nameRef.get.flatMap(n =>
+            if n.nonEmpty then deleteConsumer(stream, n).attempt.void
+            else F.unit
+          )
+        )
+      yield
+        // Delete the current consumer and recreate it resuming from the last
+        // in-order stream sequence (or, if nothing was delivered yet, from the
+        // original policy). Heals gaps and post-reconnect consumer loss.
+        val recreate: F[Unit] =
+          state.get.flatMap { st =>
+            val (dp, oss, ost) =
+              if st.lastStreamSeq > 0 then
+                (
+                  DeliverPolicy.ByStartSequence,
+                  Some(st.lastStreamSeq + 1),
+                  None
+                )
+              else (opts.deliverPolicy, opts.optStartSeq, opts.optStartTime)
+            nameRef.get.flatMap { old =>
+              (if old.nonEmpty then deleteConsumer(stream, old).attempt.void
+               else F.unit) *>
+                addConsumer(
+                  stream,
+                  orderedConfig(filterSubject, opts, inbox, dp, oss, ost)
+                ).flatMap { info =>
+                  nameRef.set(info.name) *>
+                    state.set(OrderedState(1L, st.lastStreamSeq, st.cycle + 1))
+                }
+            }
+          }
+
+        // Liveness: the server emits idle heartbeats every `idleHeartbeat` while
+        // the consumer is alive, so a silence longer than a couple of intervals
+        // means the consumer was lost (e.g. deleted/expired after a reconnect) —
+        // recreate it. Ticks are merged into the delivery stream and handled by
+        // the same sequential pull, so no extra synchronization is needed.
+        val livenessTimeout = opts.idleHeartbeat * 2 + 1.second
+        val ticks =
+          Stream.awakeEvery[F](opts.idleHeartbeat).as(Option.empty[NatsMessage])
+
+        val onMessage: NatsMessage => F[Option[JsMessage[F]]] = m =>
+          F.monotonic.flatMap(lastSeen.set) *> (
+            PushStatus.classify(m.status, m.replyTo, m.statusDescription) match
+              case PushSignal.Data =>
+                handleOrderedData(m, state, nameRef, recreate)
+              case PushSignal.Heartbeat          => F.pure(None)
+              case PushSignal.FlowControl(reply) =>
+                client.publish(reply, Chunk.empty).as(None)
+              // A deleted/expired consumer surfaces as a terminal status; heal
+              // it rather than failing the stream.
+              case PushSignal.Fail(_, _) => recreate.as(None)
+          )
+
+        val livenessCheck: F[Unit] =
+          (F.monotonic, lastSeen.get).flatMapN { (now, seen) =>
+            if now - seen > livenessTimeout then
+              recreate *> F.monotonic.flatMap(lastSeen.set)
+            else F.unit
+          }
+
+        val ordered =
+          delivery.map(Option(_)).mergeHaltL(ticks).evalMapFilter {
+            case Some(m) => onMessage(m)
+            case None    => livenessCheck.as(None)
+          }
+        (first, ordered)
+
+    private def handleOrderedData(
+        m: NatsMessage,
+        state: Ref[F, OrderedState],
+        nameRef: Ref[F, String],
+        recreate: F[Unit]
+    ): F[Option[JsMessage[F]]] =
+      buildJsMessage(m).flatMap { jm =>
+        val meta = jm.metadata
+        (nameRef.get, state.get).flatMapN { (curName, st) =>
+          // Drop deliveries from a previous cycle (arriving after a recreate).
+          if meta.consumer != curName then F.pure(None)
+          else
+            OrderedConsumer.decide(
+              st.expectedConsumerSeq,
+              st.lastStreamSeq,
+              meta.consumerSeq
+            ) match
+              case OrderedConsumer.Decision.Emit =>
+                state
+                  .set(
+                    st.copy(
+                      expectedConsumerSeq = st.expectedConsumerSeq + 1,
+                      lastStreamSeq = meta.streamSeq
+                    )
+                  )
+                  .as(Some(jm))
+              case OrderedConsumer.Decision.Recreate(_) => recreate.as(None)
+              case OrderedConsumer.Decision.DropStale   => F.pure(None)
+        }
+      }
+
+    private def orderedConfig(
+        filterSubject: Option[String],
+        opts: OrderedConsumerOptions,
+        inbox: String,
+        deliverPolicy: DeliverPolicy,
+        optStartSeq: Option[Long],
+        optStartTime: Option[Instant]
+    ): ConsumerConfig =
+      ConsumerConfig(
+        deliverPolicy = deliverPolicy,
+        optStartSeq = optStartSeq,
+        optStartTime = optStartTime,
+        ackPolicy = AckPolicy.None,
+        filterSubject = filterSubject,
+        headersOnly = opts.headersOnly,
+        deliverSubject = Some(inbox),
+        flowControl = true,
+        idleHeartbeat = Some(opts.idleHeartbeat),
+        inactiveThreshold = Some(opts.inactiveThreshold)
+      )
 
     // ---- Key-Value ----
 
