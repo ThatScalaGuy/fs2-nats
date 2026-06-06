@@ -74,6 +74,29 @@ enum NatsCredentials:
     */
   case NKey(seed: String, jwt: Option[String] = None)
 
+object NatsCredentials:
+  /** Parse the contents of a `.creds` file (the decentralized-JWT credential
+    * format produced by `nsc`) into [[NatsCredentials.NKey]] credentials.
+    *
+    * @param content
+    *   The full text of a `.creds` file
+    * @return
+    *   Either a parse error or the extracted JWT + seed credentials
+    */
+  def fromCreds(content: String): Either[Throwable, NatsCredentials] =
+    fs2.nats.auth.Creds.parse(content)
+
+  /** Load and parse a `.creds` file from disk into [[NatsCredentials.NKey]]
+    * credentials.
+    *
+    * @param path
+    *   Path to the `.creds` file
+    */
+  def fromCredsFile[F[_]: fs2.io.file.Files: cats.effect.kernel.Async](
+      path: fs2.io.file.Path
+  ): F[NatsCredentials] =
+    fs2.nats.auth.Creds.fromFile(path)
+
 /** Configuration for exponential backoff with jitter.
   *
   * @param baseDelay

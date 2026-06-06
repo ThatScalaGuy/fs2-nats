@@ -13,7 +13,8 @@ A functional, streaming NATS client for Scala 3, built on [FS2](https://fs2.io/)
 - **Headers support** - Full NATS 2.2+ headers support (HPUB/HMSG)
 - **Backpressure** - Configurable slow consumer policies
 - **Reconnection** - Exponential backoff with full jitter
-- **TLS support** - Secure connections with configurable TLS
+- **Authentication** - Token, user/password, NKey (Ed25519), and decentralized JWT (`.creds`) credentials
+- **TLS & mutual TLS** - Standard INFO-then-upgrade TLS with a caller-provided `TLSContext`
 - **Type-safe** - Leverages Scala 3 features for safety
 
 ## Installation
@@ -304,6 +305,79 @@ the bucket allows it; chunk reads use the gap-resetting ordered consumer, so a
 JetStream context: `createObjectStore`, `objectStore`, `deleteObjectStore`,
 `objectStoreStatus`, `objectStoreNames`.
 
+## Authentication & TLS
+
+`fs2-nats` supports every client-side NATS authentication mechanism. Choose one
+by setting `ClientConfig.credentials`.
+
+### Token
+
+```scala
+ClientConfig(host = host, port = port, credentials = Some(NatsCredentials.Token("s3cr3t")))
+```
+
+### Username / password
+
+```scala
+ClientConfig(host = host, port = port, credentials = Some(NatsCredentials.UserPassword("user", "pass")))
+```
+
+### NKey (Ed25519)
+
+Provide the NKey seed (an `S...` string); the client signs the server's nonce
+and derives the public key from it:
+
+```scala
+ClientConfig(host = host, port = port, credentials = Some(NatsCredentials.NKey("SUAB...seed...")))
+```
+
+### Decentralized JWT (`.creds` files)
+
+Operator-mode deployments (NGS / Synadia Cloud / self-hosted with `nsc`) issue a
+`.creds` file bundling a user JWT and an NKey seed. Load it directly:
+
+```scala
+import fs2.io.file.Path
+import fs2.nats.client.{ClientConfig, NatsClient, NatsCredentials}
+
+NatsCredentials.fromCredsFile[IO](Path("user.creds")).flatMap { creds =>
+  NatsClient
+    .connect[IO](ClientConfig(host = host, port = port, credentials = Some(creds)))
+    .use { client => /* ... */ }
+}
+```
+
+`NatsCredentials.fromCreds(content)` parses an already-loaded string.
+
+### TLS
+
+Set `useTls = true` and supply a `TLSContext` — one is required; the client
+never falls back to plaintext or a default context:
+
+```scala
+import fs2.io.net.Network
+
+val tls = Network[IO].tlsContext.system // or .fromSSLContext(...)
+
+NatsClient
+  .connect[IO](ClientConfig(host = host, port = port, useTls = true), tlsContext = Some(tls))
+  .use { client => /* ... */ }
+```
+
+The client follows the standard NATS handshake: it reads the plaintext `INFO`,
+then upgrades the connection to TLS. Servers configured with
+`handshake_first: true` (TLS before `INFO`) are not supported.
+
+### Mutual TLS
+
+For mutual TLS, build the `TLSContext` from an `SSLContext` whose `KeyManager`
+presents your client certificate (and whose `TrustManager` trusts the server's
+CA), then pass it exactly as above:
+
+```scala
+val tls = Network[IO].tlsContext.fromSSLContext(mySslContext)
+```
+
 ## Configuration
 
 ### ClientConfig
@@ -406,6 +480,13 @@ docker-compose up -d
 sbt integration/test
 docker-compose down
 ```
+
+`docker-compose.yml` defines a broker per auth mode — `nats-nkey` (4223),
+`nats-token` (4224), `nats-userpass` (4225), `nats-creds` (4226, operator mode),
+`nats-tls` (4227) and `nats-mtls` (4228) — alongside the default `nats` (4222).
+The decentralized-JWT fixtures (`integration/src/test/resources/testuser.creds`,
+`nats-creds.conf`) are generated with `nsc`, and the TLS certificates are
+regenerated with `integration/src/test/resources/tls/gen-certs.sh`.
 
 ### Pre-push hook (optional)
 
