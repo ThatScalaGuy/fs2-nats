@@ -5,6 +5,7 @@ lazy val V = new {
   val catsEffect = "3.6.3"
   val fs2 = "3.12.2"
   val jsoniter = "2.38.14"
+  val bouncyCastle = "1.78.1"
   val munit = "1.2.1"
   val munitCatsEffect = "2.1.0"
   val scalaCheck = "1.19.0"
@@ -43,6 +44,7 @@ lazy val root = project
       "co.fs2" %% "fs2-io" % V.fs2,
       "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-core" % V.jsoniter,
       "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-macros" % V.jsoniter % "compile-internal",
+      "org.bouncycastle" % "bcprov-jdk18on" % V.bouncyCastle,
       "org.scalameta" %% "munit" % V.munit % Test,
       "org.typelevel" %% "munit-cats-effect" % V.munitCatsEffect % Test,
       "org.scalacheck" %% "scalacheck" % V.scalaCheck % Test,

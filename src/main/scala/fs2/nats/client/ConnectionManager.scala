@@ -23,6 +23,7 @@ import com.comcast.ip4s.{SocketAddress}
 import fs2.{Chunk, Stream}
 import fs2.io.net.Network
 import fs2.io.net.tls.TLSContext
+import fs2.nats.auth.NKey
 import fs2.nats.errors.NatsError
 import fs2.nats.protocol.{Connect, Info, NatsFrame, ParserConfig}
 import fs2.nats.publish.SerializationUtils
@@ -339,14 +340,15 @@ object ConnectionManager:
         }
 
     private def sendConnect(transport: Transport[F], info: Info): F[Unit] =
-      val connectMsg = buildConnectMessage(info)
-      val connectJson = writeToString(connectMsg)
-      val connectBytes = SerializationUtils.buildConnect(connectJson)
+      Async[F].fromEither(buildConnectMessage(info)).flatMap { connectMsg =>
+        val connectJson = writeToString(connectMsg)
+        val connectBytes = SerializationUtils.buildConnect(connectJson)
 
-      transport.send(connectBytes) *>
-        transport.send(SerializationUtils.buildPing)
+        transport.send(connectBytes) *>
+          transport.send(SerializationUtils.buildPing)
+      }
 
-    private def buildConnectMessage(info: Info): Connect =
+    private def buildConnectMessage(info: Info): Either[Throwable, Connect] =
       val base = Connect(
         verbose = config.verbose,
         pedantic = config.pedantic,
@@ -358,10 +360,28 @@ object ConnectionManager:
 
       config.credentials match
         case Some(NatsCredentials.UserPassword(user, pass)) =>
-          base.copy(user = Some(user), pass = Some(pass))
+          Right(base.copy(user = Some(user), pass = Some(pass)))
         case Some(NatsCredentials.Token(token)) =>
-          base.copy(authToken = Some(token))
-        case Some(NatsCredentials.NKey(nkey, jwt)) =>
-          base.copy(nkey = Some(nkey), jwt = jwt)
+          Right(base.copy(authToken = Some(token)))
+        case Some(NatsCredentials.NKey(seed, jwt)) =>
+          info.nonce match
+            case None =>
+              Left(
+                NatsError.AuthorizationError(
+                  "server did not send a nonce; NKey authentication requires a nonce"
+                )
+              )
+            case Some(nonce) =>
+              NKey.signNonce(seed, nonce).flatMap { sig =>
+                jwt match
+                  // JWT path (operator/decentralized auth): send jwt + sig.
+                  case Some(j) =>
+                    Right(base.copy(jwt = Some(j), sig = Some(sig)))
+                  // Pure-NKey path: send the derived public nkey + sig.
+                  case None =>
+                    NKey.publicKeyFromSeed(seed).map { pub =>
+                      base.copy(nkey = Some(pub), sig = Some(sig))
+                    }
+              }
         case None =>
-          base
+          Right(base)
