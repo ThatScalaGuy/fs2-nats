@@ -249,7 +249,7 @@ object NatsClient:
     override def send(bytes: Chunk[Byte]): F[Unit] = connManager.send(bytes)
     override def close: F[Unit] = connManager.close
     override def isConnected: F[Boolean] =
-      connManager.transport.flatMap(_.isConnected)
+      connManager.transport.flatMap(_.isConnected).handleError(_ => false)
 
   private class NatsClientImpl[F[_]: Async](
       connManager: ConnectionManager[F],
@@ -284,15 +284,26 @@ object NatsClient:
         .evalMap(handleFrame)
         .compile
         .drain
-        .handleErrorWith { err =>
-          closedRef.get.flatMap { closed =>
-            if closed then Async[F].unit
-            else
-              eventQueue.offer(
-                ClientEvent.ProtocolError(err.getMessage, fatal = false)
-              ) *> connManager.reconnect(err.getMessage)
-          }
+        .attempt
+        .flatMap {
+          case Right(_) =>
+            // Frame stream ended cleanly: the socket was closed by the server.
+            onDisconnect("connection closed")
+          case Left(err) =>
+            eventQueue.offer(
+              ClientEvent.ProtocolError(err.getMessage, fatal = false)
+            ) *> onDisconnect(err.getMessage)
         }
+
+    /** Reconnect (failing over across the server pool) and resume reading
+      * frames from the new transport. If reconnection is exhausted, the raised
+      * MaxReconnectsExceeded ends the frame processor.
+      */
+    private def onDisconnect(reason: String): F[Unit] =
+      closedRef.get.flatMap { closed =>
+        if closed then Async[F].unit
+        else connManager.reconnect(reason) *> frameProcessor
+      }
 
     private def handleFrame(frame: NatsFrame): F[Unit] =
       frame match
@@ -400,7 +411,8 @@ object NatsClient:
     override def isConnected: F[Boolean] =
       closedRef.get.flatMap { closed =>
         if closed then Async[F].pure(false)
-        else connManager.transport.flatMap(_.isConnected)
+        else
+          connManager.transport.flatMap(_.isConnected).handleError(_ => false)
       }
 
     private def checkClosed: F[Unit] =
