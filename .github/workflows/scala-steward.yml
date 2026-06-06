@@ -1,0 +1,27 @@
+# Standalone Scala Steward workflow. Not managed by sbt-typelevel (which only
+# owns ci.yml / clean.yml), so it is safe from `githubWorkflowGenerate`.
+#
+# Opens grouped dependency-update PRs once a week (grouping lives in
+# .scala-steward.conf). Authenticates with a Personal Access Token rather than
+# the default GITHUB_TOKEN: PRs created with GITHUB_TOKEN do not trigger other
+# workflows, so ci.yml would never run on them. ci.yml is already wired to run
+# on the resulting `update/**` PRs.
+#
+# Setup: create a classic PAT with `repo` scope and store it as the repository
+# secret STEWARD_TOKEN.
+name: Scala Steward
+
+on:
+  schedule:
+    - cron: '0 0 * * 0' # 00:00 UTC every Sunday
+  workflow_dispatch:
+
+jobs:
+  scala-steward:
+    name: Scala Steward
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Scala Steward
+        uses: scala-steward-org/scala-steward-action@v2
+        with:
+          github-token: ${{ secrets.STEWARD_TOKEN }}
