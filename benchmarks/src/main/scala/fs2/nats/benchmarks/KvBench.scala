@@ -125,17 +125,19 @@ object KvBench extends IOApp:
       allowDirect: Boolean
   ): IO[Unit] =
     val bucket = if allowDirect then "KVBENCHGETD" else "KVBENCHGETM"
-    val label = if allowDirect then "get latency (direct)" else "get latency (msg.get)"
-    js.createKeyValue(KvConfig(bucket, allowDirect = allowDirect)).flatMap { kv =>
-      val one = IO.monotonic
-        .flatMap(t0 => kv.get("lat") *> IO.monotonic.map(_ - t0))
-        .map(_.toNanos)
-      (for
-        _ <- kv.put("lat", payload)
-        _ <- one.replicateA_(200)
-        samples <- (0 until iterations).toVector.traverse(_ => one)
-        _ <- reportLatency(label, samples)
-      yield ()).guarantee(js.deleteKeyValue(bucket).attempt.void)
+    val label =
+      if allowDirect then "get latency (direct)" else "get latency (msg.get)"
+    js.createKeyValue(KvConfig(bucket, allowDirect = allowDirect)).flatMap {
+      kv =>
+        val one = IO.monotonic
+          .flatMap(t0 => kv.get("lat") *> IO.monotonic.map(_ - t0))
+          .map(_.toNanos)
+        (for
+          _ <- kv.put("lat", payload)
+          _ <- one.replicateA_(200)
+          samples <- (0 until iterations).toVector.traverse(_ => one)
+          _ <- reportLatency(label, samples)
+        yield ()).guarantee(js.deleteKeyValue(bucket).attempt.void)
     }
 
   private def reportRate(

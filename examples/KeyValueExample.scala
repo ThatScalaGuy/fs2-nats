@@ -48,7 +48,9 @@ object KeyValueExample extends IOApp:
 
           // 3. Read it back (Direct Get fast path).
           entry <- kv.get("db.url")
-          _ <- IO.println(s"get db.url -> ${entry.map(e => new String(e.value.toArray))}")
+          _ <- IO.println(
+            s"get db.url -> ${entry.map(e => new String(e.value.toArray))}"
+          )
 
           // 4. Optimistic-concurrency update: only succeeds if the revision
           //    still matches.
