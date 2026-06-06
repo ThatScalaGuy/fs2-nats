@@ -9,7 +9,7 @@ lazy val V = new {
   val munit = "1.2.4"
   val munitCatsEffect = "2.1.0"
   val scalaCheck = "1.19.0"
-  val munitScalaCheck = "1.2.0"
+  val munitScalaCheck = "1.3.0"
 }
 
 ThisBuild / tlBaseVersion := "0.2"
