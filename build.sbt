@@ -126,6 +126,23 @@ lazy val root = project
       ProblemFilters.exclude[ReversedMissingMethodProblem](
         "fs2.nats.jetstream.JetStream.subscribeOrdered"
       ),
+      // Object Store: adds the object-store factory/management methods to the
+      // JetStream trait. Additive abstract methods MiMa flags as incompatible.
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.createObjectStore"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.objectStore"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.deleteObjectStore"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.objectStoreStatus"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream.objectStoreNames"
+      ),
       // KV: StreamConfig gains the allow_rollup_hdrs / deny_delete /
       // discard_new_per_subject flags (defaulted false). New case-class fields
       // change the synthesized apply/copy/constructor signatures.

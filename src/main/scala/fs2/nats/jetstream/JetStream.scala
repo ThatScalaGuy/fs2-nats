@@ -25,6 +25,13 @@ import fs2.nats.client.NatsClient
 import fs2.nats.errors.NatsError
 import fs2.nats.jetstream.protocol.*
 import fs2.nats.kv.{KeyValue, KvConfig, KvImpl, KvNames, KvStatus}
+import fs2.nats.objectstore.{
+  ObjConfig,
+  ObjNames,
+  ObjStatus,
+  ObjStoreImpl,
+  ObjectStore
+}
 import fs2.nats.protocol.Headers
 import fs2.nats.subscriptions.NatsMessage
 import fs2.nats.util.Tokens
@@ -185,6 +192,27 @@ trait JetStream[F[_]]:
 
   /** Stream the names of all KV buckets on the server. */
   def keyValueNames: Stream[F, String]
+
+  // ---- Object Store ----
+
+  /** Create an Object Store bucket (and its backing stream) and return a
+    * handle.
+    */
+  def createObjectStore(config: ObjConfig): F[ObjectStore[F]]
+
+  /** Bind to an existing Object Store bucket (verifies its backing stream
+    * exists).
+    */
+  def objectStore(bucket: String): F[ObjectStore[F]]
+
+  /** Delete an Object Store bucket and all its data. */
+  def deleteObjectStore(bucket: String): F[Unit]
+
+  /** Fetch the status of an Object Store bucket. */
+  def objectStoreStatus(bucket: String): F[ObjStatus]
+
+  /** Stream the names of all Object Store buckets on the server. */
+  def objectStoreNames: Stream[F, String]
 
 object JetStream:
 
@@ -626,6 +654,27 @@ object JetStream:
 
     override def keyValueNames: Stream[F, String] =
       streamNames.map(KvNames.bucketFromStream).unNone
+
+    // ---- Object Store ----
+
+    override def createObjectStore(objConfig: ObjConfig): F[ObjectStore[F]] =
+      ObjStoreImpl.create(this, client, subjects, config, objConfig)
+
+    override def objectStore(bucket: String): F[ObjectStore[F]] =
+      ObjStoreImpl.bind(this, client, subjects, config, bucket)
+
+    override def deleteObjectStore(bucket: String): F[Unit] =
+      F.fromEither(
+        ObjNames
+          .validateBucket(bucket)
+          .leftMap(msg => NatsError.InvalidSubject(bucket, msg))
+      ) *> deleteStream(ObjNames.streamName(bucket))
+
+    override def objectStoreStatus(bucket: String): F[ObjStatus] =
+      streamInfo(ObjNames.streamName(bucket)).map(ObjStatus.from(bucket, _))
+
+    override def objectStoreNames: Stream[F, String] =
+      streamNames.map(ObjNames.bucketFromStream).unNone
 
     private def handlePushMessage(m: NatsMessage): F[Option[JsMessage[F]]] =
       PushStatus.classify(m.status, m.replyTo, m.statusDescription) match
