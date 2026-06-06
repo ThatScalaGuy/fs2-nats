@@ -18,8 +18,9 @@ package fs2.nats.client
 
 import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
 import cats.effect.std.{Queue, Supervisor}
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
-import com.comcast.ip4s.{SocketAddress}
+import scala.concurrent.duration.*
 import fs2.{Chunk, Stream}
 import fs2.io.net.{Network, Socket}
 import fs2.io.net.tls.TLSContext
@@ -51,6 +52,22 @@ final case class ConnectionState(
     connectedAt: Instant,
     reconnectAttempt: Int
 )
+
+/** The send-side phase of the connection. Held in a single `Ref` so that the
+  * decision "send now vs buffer" and the reconnect transition "flush buffer and
+  * go online" are atomic with respect to each other.
+  *
+  *   - [[ConnPhase.Online]]: connected; writes go straight to the transport.
+  *   - [[ConnPhase.Offline]]: disconnected/reconnecting; writes accumulate in a
+  *     bounded buffer to be replayed on reconnect.
+  *   - [[ConnPhase.Closed]]: the client is closed; writes fail.
+  */
+private[client] sealed trait ConnPhase[F[_]]
+private[client] object ConnPhase:
+  final case class Online[F[_]](transport: Transport[F]) extends ConnPhase[F]
+  final case class Offline[F[_]](pending: Vector[Chunk[Byte]], bytes: Long)
+      extends ConnPhase[F]
+  final case class Closed[F[_]]() extends ConnPhase[F]
 
 /** Manages the NATS connection lifecycle including reconnection.
   *
@@ -134,9 +151,23 @@ object ConnectionManager:
     for
       eventQueue <- Resource.eval(Queue.unbounded[F, ClientEvent])
       stateRef <- Resource.eval(Ref.of[F, Option[ConnectionState]](None))
-      transportRef <- Resource.eval(Ref.of[F, Option[Transport[F]]](None))
+      connRef <- Resource.eval(
+        Ref.of[F, ConnPhase[F]](ConnPhase.Offline(Vector.empty, 0L))
+      )
       closedRef <- Resource.eval(Ref.of[F, Boolean](false))
       resubscribeRef <- Resource.eval(Ref.of[F, Option[Info => F[Unit]]](None))
+      poolRef <- Resource.eval(
+        Async[F].delay(new scala.util.Random()).flatMap { rng =>
+          Ref.of[F, ServerPool](
+            ServerPool.fromSeeds(
+              config.seedServers,
+              randomize = !config.noRandomize,
+              rng
+            )
+          )
+        }
+      )
+      connectedRef <- Resource.eval(Ref.of[F, Option[ServerAddress]](None))
       supervisor <- Supervisor[F]
 
       manager = new ConnectionManagerImpl[F](
@@ -146,9 +177,11 @@ object ConnectionManager:
         tlsContext,
         eventQueue,
         stateRef,
-        transportRef,
+        connRef,
         closedRef,
         resubscribeRef,
+        poolRef,
+        connectedRef,
         supervisor
       )
 
@@ -162,27 +195,96 @@ object ConnectionManager:
       tlsContext: Option[TLSContext[F]],
       eventQueue: Queue[F, ClientEvent],
       stateRef: Ref[F, Option[ConnectionState]],
-      transportRef: Ref[F, Option[Transport[F]]],
+      connRef: Ref[F, ConnPhase[F]],
       closedRef: Ref[F, Boolean],
       resubscribeRef: Ref[F, Option[Info => F[Unit]]],
+      poolRef: Ref[F, ServerPool],
+      connectedRef: Ref[F, Option[ServerAddress]],
       supervisor: Supervisor[F]
   ) extends ConnectionManager[F]:
 
     private val backoffPolicy = Backoff.fromConfig(config.backoff)
 
     def initialize: F[Unit] =
-      establishConnection().flatMap { case (transport, info) =>
-        val now = Instant.now()
-        val connState = ConnectionState(info, now, 0)
-        stateRef.set(Some(connState)) *>
-          transportRef.set(Some(transport)) *>
-          eventQueue.offer(ClientEvent.Connected(info))
+      poolRef.get.map(_.candidates.size).flatMap(bootstrap(_, None))
+
+    /** Sweep the seed pool once at startup, trying each server until one
+      * accepts. If no seed is reachable, surface the last connection error (so
+      * a config error such as a missing TLSContext is reported as-is).
+      */
+    private def bootstrap(
+        remaining: Int,
+        lastError: Option[Throwable]
+    ): F[Unit] =
+      if remaining <= 0 then
+        Async[F].raiseError(
+          lastError.getOrElse(
+            NatsError.ConnectionFailed("could not connect to any seed server")
+          )
+        )
+      else
+        poolRef.modify(_.next).flatMap { case (server, _) =>
+          establishConnection(server).attempt.flatMap {
+            case Right((transport, info)) =>
+              goOnline(transport, info, server)
+            case Left(err) =>
+              bootstrap(remaining - 1, Some(err))
+          }
+        }
+
+    /** Bring the initial connection online: swap to Online, record state +
+      * discovery, emit `Connected`, then flush any buffered writes (empty at
+      * startup). The install is masked; the (pollable) flush stays
+      * interruptible.
+      */
+    private def goOnline(
+        transport: Transport[F],
+        info: Info,
+        server: ServerAddress
+    ): F[Unit] =
+      Async[F].uncancelable { poll =>
+        swapOnline(transport).flatMap { pending =>
+          recordConnection(info, server) *>
+            eventQueue.offer(ClientEvent.Connected(info)) *>
+            poll(pending.traverse_(transport.send))
+        }
       }
 
+    /** Atomically swap the phase to Online and return any writes buffered while
+      * disconnected (empty on the initial connect).
+      */
+    private def swapOnline(transport: Transport[F]): F[Vector[Chunk[Byte]]] =
+      connRef.modify {
+        case ConnPhase.Offline(pending, _) =>
+          (ConnPhase.Online(transport), pending)
+        case _ =>
+          (ConnPhase.Online(transport), Vector.empty[Chunk[Byte]])
+      }
+
+    /** Record connection state and fold the server's `connect_urls` into the
+      * pool (discovery). Keyed off the address we actually dialed, not
+      * `info.host` (which the server often reports as `0.0.0.0`). Discovered
+      * peers inherit the dialed server's TLS scheme (gossip carries none).
+      */
+    private def recordConnection(info: Info, server: ServerAddress): F[Unit] =
+      stateRef.set(Some(ConnectionState(info, Instant.now(), 0))) *>
+        connectedRef.set(Some(server)) *>
+        poolRef.update(
+          _.merge(
+            parseConnectUrls(info).map(_.copy(useTls = server.useTls)),
+            server
+          )
+        )
+
+    private def parseConnectUrls(info: Info): List[ServerAddress] =
+      info.connectUrls.getOrElse(Nil).flatMap(ServerAddress.fromHostPort)
+
     override def transport: F[Transport[F]] =
-      transportRef.get.flatMap {
-        case Some(t) => Async[F].pure(t)
-        case None    => Async[F].raiseError(NatsError.ClientClosed)
+      connRef.get.flatMap {
+        case ConnPhase.Online(t)     => Async[F].pure(t)
+        case ConnPhase.Offline(_, _) =>
+          Async[F].raiseError(NatsError.ConnectionFailed("not connected"))
+        case ConnPhase.Closed() => Async[F].raiseError(NatsError.ClientClosed)
       }
 
     override def state: F[ConnectionState] =
@@ -192,7 +294,29 @@ object ConnectionManager:
       }
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
-      transport.flatMap(_.send(bytes))
+      connRef
+        .modify[Either[NatsError, Option[Transport[F]]]] {
+          case online @ ConnPhase.Online(t) =>
+            (online, Right(Some(t)))
+          case ConnPhase.Closed() =>
+            (ConnPhase.Closed(), Left(NatsError.ClientClosed))
+          case off @ ConnPhase.Offline(buf, sz) =>
+            val ns = sz + bytes.size
+            if config.reconnectBufferSize <= 0 || ns > config.reconnectBufferSize
+            then
+              (
+                off,
+                Left(
+                  NatsError.ReconnectBufferExceeded(config.reconnectBufferSize)
+                )
+              )
+            else (ConnPhase.Offline(buf :+ bytes, ns), Right(None))
+        }
+        .flatMap {
+          case Right(Some(t)) => t.send(bytes)
+          case Right(None)    => Async[F].unit
+          case Left(err)      => Async[F].raiseError(err)
+        }
 
     override def frames: Stream[F, NatsFrame] =
       Stream.eval(transport).flatMap(_.frames)
@@ -204,19 +328,24 @@ object ConnectionManager:
       closedRef.get.flatMap { closed =>
         if closed then Async[F].unit
         else
-          eventQueue.offer(
-            ClientEvent.Disconnected(reason, willReconnect = true)
-          ) *>
+          // Enter the buffering phase so writes issued during the outage are
+          // queued (up to reconnectBufferSize) instead of hitting a dead socket.
+          connRef.update {
+            case ConnPhase.Online(_) => ConnPhase.Offline(Vector.empty, 0L)
+            case other               => other
+          } *>
+            eventQueue.offer(
+              ClientEvent.Disconnected(reason, willReconnect = true)
+            ) *>
             reconnectLoop(1)
       }
 
     override def close: F[Unit] =
       closedRef.set(true) *>
-        transportRef.get.flatMap {
-          case Some(t) => t.close
-          case None    => Async[F].unit
+        connRef.getAndSet(ConnPhase.Closed()).flatMap {
+          case ConnPhase.Online(t) => t.close
+          case _                   => Async[F].unit
         } *>
-        transportRef.set(None) *>
         stateRef.set(None)
 
     override def onReconnect(resubscribe: Info => F[Unit]): F[Unit] =
@@ -226,7 +355,20 @@ object ConnectionManager:
       stateRef.update {
         case Some(s) => Some(s.copy(serverInfo = info))
         case None    => None
-      } *> eventQueue.offer(ClientEvent.ServerInfoUpdated(info))
+      } *>
+        connectedRef.get.flatMap { connected =>
+          val addr =
+            connected.getOrElse(
+              ServerAddress(config.host, config.port, config.useTls)
+            )
+          poolRef.update(
+            _.merge(
+              parseConnectUrls(info).map(_.copy(useTls = addr.useTls)),
+              addr
+            )
+          )
+        } *>
+        eventQueue.offer(ClientEvent.ServerInfoUpdated(info))
 
     private def reconnectLoop(attempt: Int): F[Unit] =
       closedRef.get.flatMap { closed =>
@@ -240,32 +382,58 @@ object ConnectionManager:
               ) *> Async[F].raiseError(error)
 
             case Some(delay) =>
-              eventQueue.offer(
-                ClientEvent.Reconnecting(attempt, delay.toMillis)
-              ) *>
-                Async[F].sleep(delay) *>
-                establishConnection().attempt.flatMap {
-                  case Right((newTransport, info)) =>
-                    val now = Instant.now()
-                    val connState = ConnectionState(info, now, 0)
-
-                    transportRef.set(Some(newTransport)) *>
-                      stateRef.set(Some(connState)) *>
-                      resubscribeRef.get.flatMap {
-                        case Some(resub) => resub(info)
-                        case None        => Async[F].unit
-                      } *>
-                      eventQueue.offer(ClientEvent.Reconnected(info, attempt))
-
-                  case Left(_) =>
-                    reconnectLoop(attempt + 1)
-                }
+              // Rotate to the next server in the pool each attempt, so an N-node
+              // cluster fails over instead of hammering the original node. Sleep
+              // only at sweep boundaries: a full pass over the pool is tried
+              // back-to-back; the backoff delay applies between sweeps.
+              poolRef.modify(_.next).flatMap { case (server, startsNewSweep) =>
+                val sleepFor: FiniteDuration =
+                  if attempt > 1 && startsNewSweep then delay else Duration.Zero
+                eventQueue.offer(
+                  ClientEvent.Reconnecting(attempt, sleepFor.toMillis)
+                ) *>
+                  Async[F].sleep(sleepFor) *>
+                  establishConnection(server).attempt.flatMap {
+                    case Right((newTransport, info)) =>
+                      goOnlineReconnect(newTransport, info, server, attempt)
+                    case Left(_) =>
+                      reconnectLoop(attempt + 1)
+                  }
+              }
       }
 
-    private def establishConnection(): F[(Transport[F], Info)] =
-      val address = SocketAddress(config.host, config.port)
+    /** Bring a freshly re-established connection online. The install (swap +
+      * record + resubscribe + `Reconnected` event) is masked so a cancel can't
+      * leave a "connected but silent" client; the reconnect-buffer flush —
+      * which may be large and blocks on the bounded write queue — stays
+      * pollable. SUBs are replayed before the buffered PUBs flush.
+      */
+    private def goOnlineReconnect(
+        transport: Transport[F],
+        info: Info,
+        server: ServerAddress,
+        attempt: Int
+    ): F[Unit] =
+      Async[F].uncancelable { poll =>
+        swapOnline(transport).flatMap { pending =>
+          recordConnection(info, server) *>
+            resubscribeRef.get.flatMap(_.traverse_(resub => resub(info))) *>
+            eventQueue.offer(ClientEvent.Reconnected(info, attempt)) *>
+            poll(pending.traverse_(transport.send))
+        }
+      }
 
-      if config.useTls then
+    private def establishConnection(
+        server: ServerAddress
+    ): F[(Transport[F], Info)] =
+      val address = server.socketAddress
+
+      // `allocated` decouples acquire from a Resource scope, so a cancel after
+      // the socket/TLS FD is acquired but before a finalizer is armed would leak
+      // it. Mask the allocate->arm handoff with uncancelable; keep the handshake
+      // (incl. the INFO wait) pollable; release on cancel or error, never on
+      // success (the caller owns the live transport).
+      if server.useTls then
         tlsContext match
           case None =>
             Async[F].raiseError(
@@ -290,18 +458,29 @@ object ConnectionManager:
                 )
               yield (transport, info)
 
-            resource.allocated.flatMap { case ((transport, info), release) =>
-              sendConnect(transport, info)
-                .as((transport, info))
-                .onError { case _ => release }
+            Async[F].uncancelable { poll =>
+              poll(resource.allocated).flatMap {
+                case ((transport, info), release) =>
+                  poll(
+                    sendConnect(transport, info, server.useTls)
+                      .as((transport, info))
+                  )
+                    .onCancel(release)
+                    .onError { case _ => release }
+              }
             }
       else
-        NatsSocket
-          .resource(address, transportConfig, parserConfig)
-          .allocated
-          .flatMap { case (transport, release) =>
-            waitForInfoAndConnect(transport, release)
+        Async[F].uncancelable { poll =>
+          poll(
+            NatsSocket
+              .resource(address, transportConfig, parserConfig)
+              .allocated
+          ).flatMap { case (transport, release) =>
+            poll(waitForInfoAndConnect(transport, server.useTls))
+              .onCancel(release)
+              .onError { case _ => release }
           }
+        }
 
     /** Read the server's INFO line from the still-plaintext socket. NATS always
       * sends INFO in the clear first; on TLS connections the client reads it
@@ -331,9 +510,11 @@ object ConnectionManager:
             )
         }
 
+    // Release of the transport on error/timeout/cancel is owned by the caller
+    // (establishConnection's uncancelable onCancel/onError); this only raises.
     private def waitForInfoAndConnect(
         transport: Transport[F],
-        releaseTransport: F[Unit]
+        useTls: Boolean
     ): F[(Transport[F], Info)] =
       val infoDeferred = Deferred.unsafe[F, Either[Throwable, Info]]
 
@@ -367,35 +548,42 @@ object ConnectionManager:
         )
         .flatMap {
           case Left(Left(err)) =>
-            releaseTransport *> Async[F].raiseError(err)
+            Async[F].raiseError(err)
 
           case Left(Right(info)) =>
-            sendConnect(transport, info).as((transport, info))
+            sendConnect(transport, info, useTls).as((transport, info))
 
           case Right(_) =>
-            releaseTransport *>
-              Async[F].raiseError(
-                NatsError.Timeout(
-                  "Waiting for server INFO",
-                  transportConfig.connectTimeout.toMillis
-                )
+            Async[F].raiseError(
+              NatsError.Timeout(
+                "Waiting for server INFO",
+                transportConfig.connectTimeout.toMillis
               )
+            )
         }
 
-    private def sendConnect(transport: Transport[F], info: Info): F[Unit] =
-      Async[F].fromEither(buildConnectMessage(info)).flatMap { connectMsg =>
-        val connectJson = writeToString(connectMsg)
-        val connectBytes = SerializationUtils.buildConnect(connectJson)
+    private def sendConnect(
+        transport: Transport[F],
+        info: Info,
+        useTls: Boolean
+    ): F[Unit] =
+      Async[F].fromEither(buildConnectMessage(info, useTls)).flatMap {
+        connectMsg =>
+          val connectJson = writeToString(connectMsg)
+          val connectBytes = SerializationUtils.buildConnect(connectJson)
 
-        transport.send(connectBytes) *>
-          transport.send(SerializationUtils.buildPing)
+          transport.send(connectBytes) *>
+            transport.send(SerializationUtils.buildPing)
       }
 
-    private def buildConnectMessage(info: Info): Either[Throwable, Connect] =
+    private def buildConnectMessage(
+        info: Info,
+        useTls: Boolean
+    ): Either[Throwable, Connect] =
       val base = Connect(
         verbose = config.verbose,
         pedantic = config.pedantic,
-        tlsRequired = config.useTls,
+        tlsRequired = useTls,
         name = config.name,
         echo = config.echo,
         headersSupported = info.headersSupported

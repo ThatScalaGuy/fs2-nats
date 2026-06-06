@@ -69,14 +69,19 @@ class OrderedConsumerIntegrationSpec extends CatsEffectSuite:
         got <- js
           .subscribeOrdered(name, Some(subject))
           .use(
-            _.map(_.payloadAsString).take(20).compile.toList
+            _.map(_.payloadAsString)
+              .take(20)
+              .compile
+              .toList
               .timeout(15.seconds)
           )
       yield assertEquals(got, (1 to 20).map(i => s"m$i").toList)
     }
   }
 
-  test("ordered consumer recovers in-order when its consumer is lost mid-stream") {
+  test(
+    "ordered consumer recovers in-order when its consumer is lost mid-stream"
+  ) {
     val name = uniqueName
     withJs(name) { js =>
       val subject = s"$name.obj"

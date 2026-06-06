@@ -17,7 +17,8 @@
 package fs2.nats.client
 
 import scala.concurrent.duration.*
-import com.comcast.ip4s.{Host, Port}
+import cats.syntax.all.*
+import com.comcast.ip4s.{Host, Port, SocketAddress}
 import fs2.io.net.tls.TLSParameters
 
 /** Policy for handling slow consumers when subscription queues fill up.
@@ -133,6 +134,46 @@ object BackoffConfig:
     maxDelay = 5.minutes
   )
 
+/** Address of a single NATS server. Used both for the configured seed list and
+  * for peers discovered via the server's INFO `connect_urls`.
+  *
+  * @param host
+  *   The server host
+  * @param port
+  *   The server port
+  * @param useTls
+  *   Whether to connect to this server over TLS. Seeds carry the scheme from
+  *   their URL; peers discovered via `connect_urls` (which carry no scheme)
+  *   inherit the scheme of the server they were learned from.
+  */
+final case class ServerAddress(host: Host, port: Port, useTls: Boolean = false):
+  def socketAddress: SocketAddress[Host] = SocketAddress(host, port)
+
+object ServerAddress:
+  /** Parse a bare `host:port` entry as advertised in INFO `connect_urls`. Also
+    * accepts a bracketed IPv6 form `[ipv6]:port` and a bare host (defaulting to
+    * port 4222). Returns None for anything unparseable so a single malformed
+    * gossip entry can be dropped without breaking discovery.
+    *
+    * @param s
+    *   The `host:port` string
+    */
+  def fromHostPort(s: String): Option[ServerAddress] =
+    val t = s.trim
+    t.lastIndexOf(':') match
+      case -1 =>
+        Host.fromString(t).map(ServerAddress(_, Port.fromInt(4222).get))
+      case i =>
+        val raw = t.take(i)
+        val host =
+          if raw.startsWith("[") && raw.endsWith("]") then
+            raw.drop(1).dropRight(1)
+          else raw
+        for
+          h <- Host.fromString(host)
+          p <- t.drop(i + 1).toIntOption.flatMap(Port.fromInt)
+        yield ServerAddress(h, p)
+
 /** Configuration for the NATS client connection.
   *
   * @param host
@@ -161,6 +202,17 @@ object BackoffConfig:
   *   Whether to enable pedantic mode (stricter checking)
   * @param echo
   *   Whether the server should echo messages back to the publishing connection
+  * @param servers
+  *   Additional seed servers beyond `host`/`port`, used for cluster bootstrap
+  *   and failover. The pool is also grown at runtime from INFO `connect_urls`.
+  * @param noRandomize
+  *   When false (default), the server pool is shuffled (the first configured
+  *   seed is still tried first) to spread connection load across the cluster.
+  *   Set true to try servers strictly in configured order.
+  * @param reconnectBufferSize
+  *   Maximum number of outbound bytes buffered while disconnected; on reconnect
+  *   the buffer is replayed so publishes are not lost. A value of 0 disables
+  *   buffering (writes during a disconnect fail immediately).
   */
 final case class ClientConfig(
     host: Host,
@@ -175,8 +227,16 @@ final case class ClientConfig(
     idleTimeout: Option[FiniteDuration] = None,
     verbose: Boolean = false,
     pedantic: Boolean = false,
-    echo: Boolean = true
-)
+    echo: Boolean = true,
+    servers: List[ServerAddress] = Nil,
+    noRandomize: Boolean = false,
+    reconnectBufferSize: Long = 8L * 1024 * 1024
+):
+  /** The full seed pool: the primary `host`/`port` first, then any extra
+    * `servers`, de-duplicated with order preserved.
+    */
+  def seedServers: List[ServerAddress] =
+    (ServerAddress(host, port, useTls) :: servers).distinct
 
 object ClientConfig:
   /** Create a minimal configuration for localhost.
@@ -233,3 +293,29 @@ object ClientConfig:
         Left(
           s"Invalid NATS URL format: $url. Expected: nats://host:port or tls://host:port"
         )
+
+  /** Create a configuration from multiple NATS URLs for cluster bootstrap. The
+    * first URL fills `host`/`port`/`useTls`; the remaining URLs become extra
+    * seed `servers`, each carrying its own scheme (`tls://` vs `nats://`) as a
+    * per-server `useTls`.
+    *
+    * @param urls
+    *   The NATS URLs (at least one)
+    * @return
+    *   Either an error message or the parsed ClientConfig
+    */
+  def fromUrls(urls: List[String]): Either[String, ClientConfig] =
+    urls match
+      case Nil =>
+        Left("fromUrls requires at least one URL")
+      case head :: tail =>
+        for
+          base <- fromUrl(head)
+          extra <- tail.traverse(parseServerAddress)
+        yield base.copy(servers = extra)
+
+  /** Parse a `nats://host:port` or `tls://host:port` URL into a ServerAddress,
+    * carrying the scheme as `useTls`.
+    */
+  private def parseServerAddress(url: String): Either[String, ServerAddress] =
+    fromUrl(url).map(c => ServerAddress(c.host, c.port, c.useTls))

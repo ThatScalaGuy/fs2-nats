@@ -68,7 +68,12 @@ class PushIntegrationSpec extends CatsEffectSuite:
         for
           _ <- IO.sleep(250.millis)
           _ <- publishN(js, s"$name.a", 3)
-          msgs <- stream.evalTap(_.ack).take(3).compile.toList.timeout(8.seconds)
+          msgs <- stream
+            .evalTap(_.ack)
+            .take(3)
+            .compile
+            .toList
+            .timeout(8.seconds)
         yield
           assertEquals(msgs.size, 3)
           assertEquals(msgs.map(_.payloadAsString), List("m1", "m2", "m3"))

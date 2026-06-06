@@ -148,6 +148,18 @@ object NatsError:
         lastError
       )
 
+  /** The reconnect write buffer filled while the client was disconnected. The
+    * outbound write was rejected rather than buffered. Increase
+    * `ClientConfig.reconnectBufferSize` or reduce publishing during outages.
+    *
+    * @param maxBytes
+    *   The configured buffer limit in bytes
+    */
+  final case class ReconnectBufferExceeded(maxBytes: Long)
+      extends NatsError(
+        s"Reconnect buffer limit of $maxBytes bytes exceeded while disconnected"
+      )
+
   /** No responders are available for a request. The server replied with a 503
     * status because no subscribers are listening on the request subject.
     *

@@ -72,9 +72,7 @@ class CredsAuthIntegrationSpec extends CatsEffectSuite:
   test("creds auth: loading testuser.creds connects and round-trips") {
     NatsCredentials
       .fromCredsFile[IO](credsPath)
-      .flatMap(creds =>
-        NatsClient.connect[IO](configFor(creds)).use(roundTrip)
-      )
+      .flatMap(creds => NatsClient.connect[IO](configFor(creds)).use(roundTrip))
       .map(assertEquals(_, "authenticated"))
       .timeout(15.seconds)
   }

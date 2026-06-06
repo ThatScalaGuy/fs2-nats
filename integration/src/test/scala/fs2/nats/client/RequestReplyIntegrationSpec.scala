@@ -51,7 +51,9 @@ class RequestReplyIntegrationSpec extends CatsEffectSuite:
         // A responder echoes each request payload back to its reply inbox.
         client.subscribe(subject).use { requests =>
           val responder = requests
-            .evalMap(m => m.replyTo.traverse_(r => client.publish(r, m.payload)))
+            .evalMap(m =>
+              m.replyTo.traverse_(r => client.publish(r, m.payload))
+            )
             .compile
             .drain
 

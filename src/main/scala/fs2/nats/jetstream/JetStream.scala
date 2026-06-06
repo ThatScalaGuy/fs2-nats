@@ -267,15 +267,21 @@ object JetStream:
         headers: Headers,
         opts: PublishOptions
     ): F[F[PubAck]] =
-      for
-        _ <- window.acquire
-        slot <- Deferred[F, Either[Throwable, PubAck]]
-        _ <- supervisor.supervise(
-          publish(subject, payload, headers, opts).attempt
-            .flatMap(slot.complete)
-            .guarantee(window.release)
-        )
-      yield slot.get.rethrow
+      // Mask acquire->spawn so a cancel can't hold a permit whose releasing
+      // fiber never started (which would shrink the window toward deadlock).
+      // The acquire wait and the returned slot.get stay pollable.
+      F.uncancelable { poll =>
+        poll(window.acquire) *>
+          Deferred[F, Either[Throwable, PubAck]].flatMap { slot =>
+            supervisor
+              .supervise(
+                publish(subject, payload, headers, opts).attempt
+                  .flatMap(slot.complete)
+                  .guarantee(window.release)
+              )
+              .as(slot.get.rethrow)
+          }
+      }
 
     private def mergePublishHeaders(
         headers: Headers,
@@ -739,10 +745,15 @@ object JetStream:
         if !canAck then F.unit
         else
           F.defer {
+            // Claim the once-guard, but roll it back if the ack round-trip is
+            // cancelled or fails, so the message stays ackable. +ACK is
+            // server-idempotent, so a double-ack after rollback is benign.
             if acked.compareAndSet(false, true) then
               client
                 .request(ackReply, AckBytes.Ack, Headers.empty, config.timeout)
                 .void
+                .onCancel(F.delay(acked.set(false)))
+                .onError { case _ => F.delay(acked.set(false)) }
             else F.unit
           }
 
@@ -750,8 +761,12 @@ object JetStream:
         if !canAck then F.unit
         else
           F.defer {
+            // Roll the guard back if cancelled before the frame is enqueued
+            // (e.g. blocked on a full write queue), so the message stays ackable.
             if acked.compareAndSet(false, true) then
-              client.publish(ackReply, bytes)
+              client
+                .publish(ackReply, bytes)
+                .onCancel(F.delay(acked.set(false)))
             else F.unit
           }
 

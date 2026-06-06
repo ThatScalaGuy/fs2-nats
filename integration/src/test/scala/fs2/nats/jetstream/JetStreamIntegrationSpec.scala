@@ -205,7 +205,7 @@ class JetStreamIntegrationSpec extends CatsEffectSuite:
         _ <- js.publish(s"$name.a", Chunk.array("first".getBytes))
         _ <- js.publish(s"$name.a", Chunk.array("second".getBytes))
         msg <- js.getMessage(name, MessageGet.LastBySubject(s"$name.a"))
-      yield assertEquals(new String(msg.data.toArray), "second")
-      ).guarantee(cleanup(js, name))
+      yield assertEquals(new String(msg.data.toArray), "second"))
+        .guarantee(cleanup(js, name))
     }
   }
