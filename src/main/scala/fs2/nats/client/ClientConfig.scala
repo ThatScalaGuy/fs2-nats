@@ -61,14 +61,18 @@ enum NatsCredentials:
     */
   case Token(token: String)
 
-  /** NKey authentication with optional JWT.
+  /** NKey authentication using a seed, with optional JWT.
     *
-    * @param nkey
-    *   The public NKey
+    * @param seed
+    *   The NKey seed (an `S...` string, e.g. `SUA...`). This is the private key
+    *   material used to sign the server nonce; the public NKey is derived from
+    *   it. Keep it secret.
     * @param jwt
-    *   Optional user JWT
+    *   Optional user JWT. When present, the CONNECT sends `jwt` + `sig`
+    *   (decentralized/operator auth). When absent, it sends the derived public
+    *   `nkey` + `sig`.
     */
-  case NKey(nkey: String, jwt: Option[String] = None)
+  case NKey(seed: String, jwt: Option[String] = None)
 
 /** Configuration for exponential backoff with jitter.
   *

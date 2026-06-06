@@ -12,3 +12,20 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Separate broker for the NKey auth integration test. Kept on its own ports so
+  # the plaintext suite against `nats` above is unaffected. Started on demand:
+  #   docker compose up -d nats-nkey
+  nats-nkey:
+    image: nats:latest
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    volumes:
+      - ./integration/src/test/resources/nats-nkey.conf:/etc/nats/nats-nkey.conf:ro
+    command: ["-c", "/etc/nats/nats-nkey.conf", "--debug"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
