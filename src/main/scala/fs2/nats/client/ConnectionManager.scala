@@ -21,11 +21,17 @@ import cats.effect.std.{Queue, Supervisor}
 import cats.syntax.all.*
 import com.comcast.ip4s.{SocketAddress}
 import fs2.{Chunk, Stream}
-import fs2.io.net.Network
+import fs2.io.net.{Network, Socket}
 import fs2.io.net.tls.TLSContext
 import fs2.nats.auth.NKey
 import fs2.nats.errors.NatsError
-import fs2.nats.protocol.{Connect, Info, NatsFrame, ParserConfig}
+import fs2.nats.protocol.{
+  Connect,
+  Info,
+  NatsFrame,
+  ParserConfig,
+  ProtocolParser
+}
 import fs2.nats.publish.SerializationUtils
 import fs2.nats.transport.{NatsSocket, TlsTransport, Transport, TransportConfig}
 import com.github.plokhotnyuk.jsoniter_scala.core.*
@@ -259,15 +265,22 @@ object ConnectionManager:
     private def establishConnection(): F[(Transport[F], Info)] =
       val address = SocketAddress(config.host, config.port)
 
-      val transportResource: Resource[F, Transport[F]] =
-        if config.useTls then
-          tlsContext match
-            case Some(ctx) =>
+      if config.useTls then
+        tlsContext match
+          case None =>
+            Async[F].raiseError(
+              NatsError.TlsError("TLS requested but no TLSContext provided")
+            )
+          case Some(ctx) =>
+            val params =
+              config.tlsParams.getOrElse(fs2.io.net.tls.TLSParameters.Default)
+            // NATS sends INFO in plaintext and only then upgrades to TLS, so
+            // read the INFO off the bare socket first and wrap it afterwards
+            // (the standard flow; `handshake_first` servers are not supported).
+            val resource =
               for
                 socket <- Network[F].client(address)
-                params = config.tlsParams.getOrElse(
-                  fs2.io.net.tls.TLSParameters.Default
-                )
+                info <- Resource.eval(readPlaintextInfo(socket))
                 transport <- TlsTransport.wrap(
                   ctx,
                   socket,
@@ -275,18 +288,48 @@ object ConnectionManager:
                   transportConfig,
                   parserConfig
                 )
-              yield transport
-            case None =>
-              Resource.eval(
-                Async[F].raiseError[Transport[F]](
-                  NatsError.TlsError("TLS requested but no TLSContext provided")
-                )
-              )
-        else NatsSocket.resource(address, transportConfig, parserConfig)
+              yield (transport, info)
 
-      transportResource.allocated.flatMap { case (transport, release) =>
-        waitForInfoAndConnect(transport, release)
-      }
+            resource.allocated.flatMap { case ((transport, info), release) =>
+              sendConnect(transport, info)
+                .as((transport, info))
+                .onError { case _ => release }
+            }
+      else
+        NatsSocket
+          .resource(address, transportConfig, parserConfig)
+          .allocated
+          .flatMap { case (transport, release) =>
+            waitForInfoAndConnect(transport, release)
+          }
+
+    /** Read the server's INFO line from the still-plaintext socket. NATS always
+      * sends INFO in the clear first; on TLS connections the client reads it
+      * here and only then upgrades the socket to TLS.
+      */
+    private def readPlaintextInfo(socket: Socket[F]): F[Info] =
+      val readInfo = socket.reads
+        .through(ProtocolParser.parseStream(parserConfig))
+        .collectFirst { case NatsFrame.InfoFrame(info) => info }
+        .compile
+        .last
+
+      Async[F]
+        .race(readInfo, Temporal[F].sleep(transportConfig.connectTimeout))
+        .flatMap {
+          case Left(Some(info)) => Async[F].pure(info)
+          case Left(None)       =>
+            Async[F].raiseError(
+              NatsError.ConnectionFailed("No INFO received from server")
+            )
+          case Right(_) =>
+            Async[F].raiseError(
+              NatsError.Timeout(
+                "Waiting for server INFO",
+                transportConfig.connectTimeout.toMillis
+              )
+            )
+        }
 
     private def waitForInfoAndConnect(
         transport: Transport[F],

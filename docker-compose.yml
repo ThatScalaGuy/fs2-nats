@@ -29,3 +29,86 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Auth integration brokers, each isolated on its own ports so the suites do
+  # not interfere. Started on demand, e.g.:
+  #   docker compose up -d nats-token nats-userpass nats-creds nats-tls nats-mtls
+
+  # Token auth (TokenAuthIntegrationSpec).
+  nats-token:
+    image: nats:latest
+    ports:
+      - "4224:4222"
+      - "8224:8222"
+    volumes:
+      - ./integration/src/test/resources/nats-token.conf:/etc/nats/nats-token.conf:ro
+    command: ["-c", "/etc/nats/nats-token.conf", "--debug"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Username/password auth (UserPasswordAuthIntegrationSpec).
+  nats-userpass:
+    image: nats:latest
+    ports:
+      - "4225:4222"
+      - "8225:8222"
+    volumes:
+      - ./integration/src/test/resources/nats-userpass.conf:/etc/nats/nats-userpass.conf:ro
+    command: ["-c", "/etc/nats/nats-userpass.conf", "--debug"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Decentralized JWT / operator mode with a MEMORY resolver
+  # (CredsAuthIntegrationSpec). Account/user JWTs are preloaded in the conf.
+  nats-creds:
+    image: nats:latest
+    ports:
+      - "4226:4222"
+      - "8226:8222"
+    volumes:
+      - ./integration/src/test/resources/nats-creds.conf:/etc/nats/nats-creds.conf:ro
+    command: ["-c", "/etc/nats/nats-creds.conf", "--debug"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-way TLS (TlsIntegrationSpec). Monitoring (8222) stays plaintext so the
+  # healthcheck is unaffected by the client-port TLS.
+  nats-tls:
+    image: nats:latest
+    ports:
+      - "4227:4222"
+      - "8227:8222"
+    volumes:
+      - ./integration/src/test/resources/nats-tls.conf:/etc/nats/nats-tls.conf:ro
+      - ./integration/src/test/resources/tls:/etc/nats/certs:ro
+    command: ["-c", "/etc/nats/nats-tls.conf", "--debug"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Mutual TLS (TlsIntegrationSpec). Requires a client cert signed by the CA.
+  nats-mtls:
+    image: nats:latest
+    ports:
+      - "4228:4222"
+      - "8228:8222"
+    volumes:
+      - ./integration/src/test/resources/nats-mtls.conf:/etc/nats/nats-mtls.conf:ro
+      - ./integration/src/test/resources/tls:/etc/nats/certs:ro
+    command: ["-c", "/etc/nats/nats-mtls.conf", "--debug"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
