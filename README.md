@@ -1,31 +1,82 @@
-# fs2-nats
+<div align="center">
 
-A functional, streaming NATS client for Scala 3, built on [FS2](https://fs2.io/) and [Cats Effect 3](https://typelevel.org/cats-effect/).
+# fs2-nats 🐈‍⬛📡
 
-## Features
+**A functional, streaming [NATS](https://nats.io/) client for Scala 3 — built on [Cats Effect 3](https://typelevel.org/cats-effect/) and [FS2](https://fs2.io/).**
 
-- **Pure functional** - Built entirely on Cats Effect 3 and FS2
-- **Streaming first** - Native FS2 streams for message handling
-- **Request/Reply** - Shared-inbox request primitive with no-responders fast-fail
-- **JetStream** - Streams, consumers, persistent publish (PubAck), pull & push consume with full ack semantics
-- **Key-Value** - Buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch
-- **Object Store** - Large binary objects chunked over JetStream with streaming put/get, SHA-256 verification, links, and watch
-- **Headers support** - Full NATS 2.2+ headers support (HPUB/HMSG)
-- **Backpressure** - Configurable slow consumer policies
-- **Reconnection** - Exponential backoff with full jitter
-- **Authentication** - Token, user/password, NKey (Ed25519), and decentralized JWT (`.creds`) credentials
-- **TLS & mutual TLS** - Standard INFO-then-upgrade TLS with a caller-provided `TLSContext`
-- **Type-safe** - Leverages Scala 3 features for safety
+*Every subscription is a `Stream`. Every connection is a `Resource`. Nothing happens until you ask it to.*
 
-## Installation
+[![Maven Central](https://img.shields.io/maven-central/v/de.thatscalaguy/fs2-nats_3?style=flat-square&logo=apachemaven&logoColor=white&label=Maven%20Central&color=blue)](https://central.sonatype.com/artifact/de.thatscalaguy/fs2-nats_3)
+[![Cats Friendly](https://typelevel.org/cats/img/cats-badge-tiny.png)](https://typelevel.org/cats/#cats-friendly-libraries)
+[![CI](https://img.shields.io/github/actions/workflow/status/ThatScalaGuy/fs2-nats/ci.yml?branch=main&style=flat-square&logo=github&label=CI)](https://github.com/ThatScalaGuy/fs2-nats/actions/workflows/ci.yml)
+[![javadoc](https://javadoc.io/badge2/de.thatscalaguy/fs2-nats_3/scaladoc.svg?style=flat-square&label=API%20docs)](https://javadoc.io/doc/de.thatscalaguy/fs2-nats_3)
+<br/>
+[![Scala 3.3 LTS](https://img.shields.io/badge/Scala-3.3%20LTS-DC322F?style=flat-square&logo=scala&logoColor=white)](https://www.scala-lang.org/)
+[![JDK 11+](https://img.shields.io/badge/JDK-11%2B-007396?style=flat-square&logo=openjdk&logoColor=white)](https://adoptium.net/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](https://www.apache.org/licenses/LICENSE-2.0)
 
-Add to your `build.sbt`:
+</div>
+
+---
+
+`fs2-nats` lets you talk to NATS the functional way. Subscriptions are native `fs2.Stream`s,
+the client is a `Resource` that cleans up after itself, reconnection and backpressure are
+built in, and the whole surface — core pub/sub, request/reply, JetStream, Key-Value, and
+Object Store — stays inside Cats Effect from the first byte to the last. No callbacks, no
+hidden threads, no surprises. 🎉
+
+## ✨ Highlights
+
+- 🧊 **Pure functional** — built entirely on Cats Effect 3 and FS2, referentially transparent end to end
+- 🌊 **Streaming first** — every subscription is an `fs2.Stream[F, NatsMessage]`
+- 🔁 **Request/Reply** — shared-inbox request primitive with no-responders fast-fail
+- 💾 **JetStream** — streams, consumers, persistent publish (PubAck), pull & push consume with full ack semantics
+- 🗂️ **Key-Value** — buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch
+- 📦 **Object Store** — large binary objects chunked over JetStream with streaming put/get, SHA-256 verification, links, and watch
+- 🏷️ **Headers** — full NATS 2.2+ headers support (HPUB/HMSG)
+- 🚦 **Backpressure** — configurable slow-consumer policies (block / drop / error)
+- 🔌 **Reconnection** — exponential backoff with full jitter, automatic subscription replay, and cluster failover
+- 🔐 **Authentication** — token, user/password, NKey (Ed25519), and decentralized JWT (`.creds`)
+- 🔒 **TLS & mutual TLS** — standard INFO-then-upgrade TLS with a caller-provided `TLSContext`
+- 🎯 **Type-safe** — leverages Scala 3 features for safety
+
+## 🧩 Compatibility
+
+| | Version |
+|---|---|
+| **Scala** | 3.3.7 (Scala 3.3 **LTS**) |
+| **JDK** | 11, 17, 21, 25 — **minimum JDK 11** |
+| **Cats Effect** | 3.7.x |
+| **FS2** | 3.13.x |
+| **NATS Server** | **2.9+** recommended |
+
+> **NATS server versions:** core messaging, headers, and JetStream work against **NATS Server 2.2+**.
+> The Key-Value and Object Store features use the JetStream **Direct Get** API, which requires
+> **NATS Server 2.9+**. The test suite runs against the latest `nats` Docker image.
+
+## 📦 Installation
+
+> **Latest release: `0.2.0`** — published to Maven Central for Scala 3.
+
+**sbt**
 
 ```scala
-libraryDependencies += "io.github.thatscalaguy" %% "fs2-nats" % "0.1.0"
+libraryDependencies += "de.thatscalaguy" %% "fs2-nats" % "0.2.0"
 ```
 
-## Quick Start
+**Mill**
+
+```scala
+ivy"de.thatscalaguy::fs2-nats:0.2.0"
+```
+
+**scala-cli**
+
+```scala
+//> using dep de.thatscalaguy::fs2-nats:0.2.0
+```
+
+## 🚀 Quick Start
 
 ### Prerequisites
 
@@ -144,7 +195,7 @@ val reply = client.request("service.echo", Chunk.array("ping".getBytes))
 // or NatsError.Timeout if no reply arrives within the timeout.
 ```
 
-## JetStream
+## 💾 JetStream
 
 JetStream is obtained as a `Resource` over a connected client (requires a
 JetStream-enabled server, e.g. `nats-server -js`). It owns the publish window
@@ -207,7 +258,7 @@ repeatable.
 subscription replay on reconnect; the pull `consume` loop additionally re-issues
 its request on a cadence so it resumes after a dropped connection.
 
-## Key-Value Store
+## 🗂️ Key-Value Store
 
 A Key-Value bucket is an opinionated JetStream stream (`KV_<bucket>`, subjects
 `$KV.<bucket>.>`). KV handles are obtained from the JetStream context. Reads use
@@ -258,7 +309,7 @@ when their optimistic-concurrency precondition fails.
 `keys`/`history`/`watch` stream from a gap-resetting **ordered consumer**, so a
 reconnect mid-watch recovers in order rather than missing updates.
 
-## Object Store
+## 📦 Object Store
 
 An Object Store bucket is an opinionated JetStream stream (`OBJ_<bucket>`,
 subjects `$O.<bucket>.C.>` for chunks and `$O.<bucket>.M.>` for per-object
@@ -305,7 +356,7 @@ the bucket allows it; chunk reads use the gap-resetting ordered consumer, so a
 JetStream context: `createObjectStore`, `objectStore`, `deleteObjectStore`,
 `objectStoreStatus`, `objectStoreNames`.
 
-## Authentication & TLS
+## 🔐 Authentication & TLS
 
 `fs2-nats` supports every client-side NATS authentication mechanism. Choose one
 by setting `ClientConfig.credentials`.
@@ -378,7 +429,7 @@ CA), then pass it exactly as above:
 val tls = Network[IO].tlsContext.fromSSLContext(mySslContext)
 ```
 
-## Configuration
+## ⚙️ Configuration
 
 ### ClientConfig
 
@@ -436,7 +487,7 @@ val fixed = Backoff.fixed(5.seconds, maxRetries = Some(5))
 val immediate = Backoff.immediate(maxRetries = 3)
 ```
 
-## Architecture
+## 🏗️ Architecture
 
 ```
 fs2.nats
@@ -465,7 +516,7 @@ fs2.nats
     └── NatsError         # Error ADT
 ```
 
-## Testing
+## 🧪 Testing
 
 Run unit tests:
 
@@ -500,7 +551,7 @@ git config core.hooksPath .githooks
 
 Bypass a single push with `SKIP_PREPUSH=1 git push`.
 
-## Examples
+## 📚 Examples
 
 See the `examples/` directory for complete examples:
 
@@ -517,6 +568,12 @@ Run examples:
 sbt "runMain fs2.nats.examples.Basic"
 ```
 
-## License
+## 🤝 Contributing
 
-Apache License 2.0
+Contributions are welcome! Issues and pull requests are happily accepted over on
+[GitHub](https://github.com/ThatScalaGuy/fs2-nats). The pre-push hook above runs
+the same checks as CI, so enabling it is the quickest way to keep the build green.
+
+## 📄 License
+
+Licensed under the [Apache License 2.0](LICENSE).
