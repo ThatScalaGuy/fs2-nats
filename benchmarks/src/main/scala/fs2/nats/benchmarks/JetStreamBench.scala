@@ -33,8 +33,8 @@ import scala.concurrent.duration.*
   *   - pull `consume` throughput, including a fire-and-forget ack per message
   *   - synchronous `publish` round-trip latency (publish -> PubAck)
   *
-  * Prerequisites: a JetStream-enabled NATS server, e.g.
-  * `docker compose up -d` (the compose file runs `nats -js`).
+  * Prerequisites: a JetStream-enabled NATS server, e.g. `docker compose up -d`
+  * (the compose file runs `nats -js`).
   *
   * Run:
   * {{{
@@ -94,7 +94,9 @@ object JetStreamBench extends IOApp:
       for
         // ---- pipelined publish (PubAck per message) ----
         p0 <- IO.monotonic
-        acks <- (0 until n).toList.traverse(_ => js.publishAsync(subject, payload))
+        acks <- (0 until n).toList.traverse(_ =>
+          js.publishAsync(subject, payload)
+        )
         _ <- acks.sequence_
         p1 <- IO.monotonic
 
