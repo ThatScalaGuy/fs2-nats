@@ -4,7 +4,7 @@
 
 **A functional, streaming [NATS](https://nats.io/) client for Scala 3 — built on [Cats Effect 3](https://typelevel.org/cats-effect/) and [FS2](https://fs2.io/).**
 
-*Every subscription is a `Stream`. Every connection is a `Resource`. Nothing happens until you ask it to.*
+_Every subscription is a `Stream`. Every connection is a `Resource`. Nothing happens until you ask it to._
 
 [![Maven Central](https://img.shields.io/maven-central/v/de.thatscalaguy/fs2-nats_3?style=flat-square&logo=apachemaven&logoColor=white&label=Maven%20Central&color=blue)](https://central.sonatype.com/artifact/de.thatscalaguy/fs2-nats_3)
 [![Cats Friendly](https://typelevel.org/cats/img/cats-badge-tiny.png)](https://typelevel.org/cats/#cats-friendly-libraries)
@@ -42,13 +42,13 @@ hidden threads, no surprises. 🎉
 
 ## 🧩 Compatibility
 
-| | Version |
-|---|---|
-| **Scala** | 3.3.7 (Scala 3.3 **LTS**) |
-| **JDK** | 11, 17, 21, 25 — **minimum JDK 11** |
-| **Cats Effect** | 3.7.x |
-| **FS2** | 3.13.x |
-| **NATS Server** | **2.9+** recommended |
+|                 | Version                             |
+| --------------- | ----------------------------------- |
+| **Scala**       | 3.3.7 (Scala 3.3 **LTS**)           |
+| **JDK**         | 11, 17, 21, 25 — **minimum JDK 11** |
+| **Cats Effect** | 3.7.x                               |
+| **FS2**         | 3.13.x                              |
+| **NATS Server** | **2.9+** recommended                |
 
 > **NATS server versions:** core messaging, headers, and JetStream work against **NATS Server 2.2+**.
 > The Key-Value and Object Store features use the JetStream **Direct Get** API, which requires
@@ -567,6 +567,13 @@ Run examples:
 ```bash
 sbt "runMain fs2.nats.examples.Basic"
 ```
+
+## 💼 Commercial Support
+
+fs2-nats is built and maintained by **[ThatScalaGuy](https://www.thatscalaguy.de)**
+
+Need extended or help on your project?
+**Get in touch at [thatscalaguy.de](https://www.thatscalaguy.de).**
 
 ## 🤝 Contributing
 
