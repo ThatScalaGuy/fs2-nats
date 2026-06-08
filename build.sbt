@@ -189,3 +189,22 @@ lazy val benchmarks = project
     tlFatalWarnings := false,
     Compile / javacOptions ~= (_.filterNot(_ == "-Werror"))
   )
+
+lazy val docs = project
+  .in(file("site"))
+  .enablePlugins(TypelevelSitePlugin)
+  .dependsOn(root)
+  .settings(
+    name := "fs2-nats-docs",
+    scalaVersion := V.scala3,
+    // Read markdown sources from the repo-root `docs/` dir (deterministic; the
+    // plugin otherwise inherits MdocPlugin's project-relative `site/docs` default).
+    mdocIn := (ThisBuild / baseDirectory).value / "docs",
+    // mdoc snippets trip `-Wunused:all`, which CI promotes to errors. Same
+    // rationale as the benchmarks module — don't fail the docs build on those.
+    tlFatalWarnings := false,
+    // Adds an "API" link in the site navigation pointing at the published Scaladoc.
+    tlSiteApiUrl := Some(
+      url("https://www.javadoc.io/doc/de.thatscalaguy/fs2-nats_3/latest/")
+    )
+  )
