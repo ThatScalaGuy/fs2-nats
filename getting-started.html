@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+  
+  <head>
+  <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Typelevel Laika + Helium Theme" />
+  <title>Getting Started</title>
+  
+  <meta name="author" content="fs2-nats contributors"/>
+  
+  <meta name="author" content="Sven Herrmann"/>
+  
+  
+  <meta name="description" content="fs2-nats-docs"/>
+  
+  
+  
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Lato:400,700">
+  
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Fira+Mono:500">
+  
+  <link rel="stylesheet" type="text/css" href="helium/site/icofont.min.css" />
+    <link rel="stylesheet" type="text/css" href="helium/site/laika-helium.css" />
+  <script src="helium/site/laika-helium.js"></script>
+  
+  
+  <script> /* for avoiding page load transitions */ </script>
+</head>
+
+  <body>
+
+    <header id="top-bar" class="light-default dark-default">
+
+  <div class="row">
+    <a id="nav-icon">
+      <i class="icofont-laika navigationMenu" title="Navigation">&#xefa2;</i>
+    </a>
+    
+    
+  </div>
+
+  <a class="icon-link glyph-link" href="index.html"><i class="icofont-laika home" title="Home">&#xef47;</i></a>
+
+  <div class="row links">
+    
+    <a class="icon-link svg-link" href="https://www.javadoc.io/doc/de.thatscalaguy/fs2-nats_3/latest/"><span class="api" title="API"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M75,47.5c13.246,0 24,10.754 24,24c0,13.246 -10.754,24 -24,24c-13.246,0 -24,-10.754 -24,-24c0,-13.246 10.754,-24 24,-24Zm-50,-0c13.246,-0 24,10.754 24,24c0,13.246 -10.754,24 -24,24c-13.246,-0 -24,-10.754 -24,-24c0,-13.246 10.754,-24 24,-24Zm2.705,16.735l7.239,0l0.622,-4.904l-21.833,0l-0,4.904l7.589,0l0,22.067l6.383,0l-0,-22.067Zm58.076,7.265c-0,-8.757 -3.698,-14.166 -10.781,-14.166c-7.083,-0 -10.781,5.604 -10.781,14.166c0,8.757 3.698,14.166 10.781,14.166c7.083,0 10.781,-5.604 10.781,-14.166Zm-6.539,0c0,6.538 -1.128,9.496 -4.242,9.496c-2.997,0 -4.242,-2.88 -4.242,-9.496c-0,-6.616 1.206,-9.496 4.242,-9.496c3.036,-0 4.242,2.88 4.242,9.496Zm-29.242,-67c13.246,0 24,10.754 24,24c0,13.246 -10.754,24 -24,24c-13.246,0 -24,-10.754 -24,-24c0,-13.246 10.754,-24 24,-24Zm0.512,9.834c-7.122,-0 -12.609,5.098 -12.609,14.127c-0,9.263 5.215,14.205 12.532,14.205c4.164,0 7.083,-1.634 9.068,-3.658l-2.88,-3.697c-1.518,1.206 -3.153,2.413 -5.838,2.413c-3.697,-0 -6.266,-2.763 -6.266,-9.263c-0,-6.616 2.724,-9.379 6.149,-9.379c2.102,-0 3.892,0.778 5.371,1.984l3.113,-3.775c-2.257,-1.868 -4.748,-2.957 -8.64,-2.957Z"/>
+  </g>
+</svg></span></a>
+    
+    <a class="icon-link svg-link" href="https://github.com/ThatScalaGuy/fs2-nats"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>  
+
+</header>
+    
+    <nav id="sidebar">
+
+  <div class="row">
+    
+    <a class="icon-link svg-link" href="https://www.javadoc.io/doc/de.thatscalaguy/fs2-nats_3/latest/"><span class="api" title="API"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M75,47.5c13.246,0 24,10.754 24,24c0,13.246 -10.754,24 -24,24c-13.246,0 -24,-10.754 -24,-24c0,-13.246 10.754,-24 24,-24Zm-50,-0c13.246,-0 24,10.754 24,24c0,13.246 -10.754,24 -24,24c-13.246,-0 -24,-10.754 -24,-24c0,-13.246 10.754,-24 24,-24Zm2.705,16.735l7.239,0l0.622,-4.904l-21.833,0l-0,4.904l7.589,0l0,22.067l6.383,0l-0,-22.067Zm58.076,7.265c-0,-8.757 -3.698,-14.166 -10.781,-14.166c-7.083,-0 -10.781,5.604 -10.781,14.166c0,8.757 3.698,14.166 10.781,14.166c7.083,0 10.781,-5.604 10.781,-14.166Zm-6.539,0c0,6.538 -1.128,9.496 -4.242,9.496c-2.997,0 -4.242,-2.88 -4.242,-9.496c-0,-6.616 1.206,-9.496 4.242,-9.496c3.036,-0 4.242,2.88 4.242,9.496Zm-29.242,-67c13.246,0 24,10.754 24,24c0,13.246 -10.754,24 -24,24c-13.246,0 -24,-10.754 -24,-24c0,-13.246 10.754,-24 24,-24Zm0.512,9.834c-7.122,-0 -12.609,5.098 -12.609,14.127c-0,9.263 5.215,14.205 12.532,14.205c4.164,0 7.083,-1.634 9.068,-3.658l-2.88,-3.697c-1.518,1.206 -3.153,2.413 -5.838,2.413c-3.697,-0 -6.266,-2.763 -6.266,-9.263c-0,-6.616 2.724,-9.379 6.149,-9.379c2.102,-0 3.892,0.778 5.371,1.984l3.113,-3.775c-2.257,-1.868 -4.748,-2.957 -8.64,-2.957Z"/>
+  </g>
+</svg></span></a>
+    
+    <a class="icon-link svg-link" href="https://github.com/ThatScalaGuy/fs2-nats"><span class="github" title="Source Code"><svg class="svg-icon" width="100%" height="100%" viewBox="0 0 100 100" version="1.1" xmlns="http://www.w3.org/2000/svg" xml:space="preserve" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
+  <g class="svg-shape">
+    <path d="M49.995,1c-27.609,-0 -49.995,22.386 -49.995,50.002c-0,22.09 14.325,40.83 34.194,47.444c2.501,0.458 3.413,-1.086 3.413,-2.412c0,-1.185 -0.043,-4.331 -0.067,-8.503c-13.908,3.021 -16.843,-6.704 -16.843,-6.704c-2.274,-5.773 -5.552,-7.311 -5.552,-7.311c-4.54,-3.103 0.344,-3.042 0.344,-3.042c5.018,0.356 7.658,5.154 7.658,5.154c4.46,7.64 11.704,5.433 14.552,4.156c0.454,-3.232 1.744,-5.436 3.174,-6.685c-11.102,-1.262 -22.775,-5.553 -22.775,-24.713c-0,-5.457 1.949,-9.92 5.147,-13.416c-0.516,-1.265 -2.231,-6.348 0.488,-13.233c0,0 4.199,-1.344 13.751,5.126c3.988,-1.108 8.266,-1.663 12.518,-1.682c4.245,0.019 8.523,0.574 12.517,1.682c9.546,-6.47 13.736,-5.126 13.736,-5.126c2.728,6.885 1.013,11.968 0.497,13.233c3.204,3.496 5.141,7.959 5.141,13.416c0,19.209 -11.691,23.436 -22.83,24.673c1.795,1.544 3.394,4.595 3.394,9.26c0,6.682 -0.061,12.076 -0.061,13.715c0,1.338 0.899,2.894 3.438,2.406c19.853,-6.627 34.166,-25.354 34.166,-47.438c-0,-27.616 -22.389,-50.002 -50.005,-50.002"/>
+  </g>
+</svg></span></a>
+    
+  </div>
+
+  <ul class="nav-list">
+    <li class="level1 active nav-leaf"><a href="#">Getting Started</a></li>
+    <li class="level1 nav-leaf"><a href="jetstream.html">JetStream</a></li>
+    <li class="level1 nav-leaf"><a href="key-value.html">Key-Value Store</a></li>
+    <li class="level1 nav-leaf"><a href="object-store.html">Object Store</a></li>
+    <li class="level1 nav-leaf"><a href="auth.html">Authentication &amp; TLS</a></li>
+  </ul>
+
+</nav>
+
+    <div id="container">
+
+      
+<nav id="page-nav">
+  <p class="header"><a href="#">Getting Started</a></p>
+
+  <ul class="nav-list">
+    <li class="level1 nav-leaf"><a href="#prerequisites">Prerequisites</a></li>
+    <li class="level1 nav-leaf"><a href="#basic-usage">Basic usage</a></li>
+    <li class="level1 nav-leaf"><a href="#publishing-with-headers">Publishing with headers</a></li>
+    <li class="level1 nav-leaf"><a href="#wildcard-subscriptions">Wildcard subscriptions</a></li>
+    <li class="level1 nav-leaf"><a href="#queue-groups-load-balancing">Queue groups (load balancing)</a></li>
+    <li class="level1 nav-leaf"><a href="#connection-events">Connection events</a></li>
+    <li class="level1 nav-leaf"><a href="#request-reply">Request/Reply</a></li>
+  </ul>
+
+  <p class="footer"></p>
+</nav>
+
+
+      <main class="content">
+
+        <h1 id="getting-started" class="title">Getting Started</h1>
+        <p>This page covers the core pub/sub surface: connecting, publishing, subscribing,
+        wildcards, queue groups, connection events, and request/reply.</p>
+        
+        <h2 id="prerequisites" class="section"><a class="anchor-link left" href="#prerequisites"><i class="icofont-laika link">&#xef71;</i></a>Prerequisites</h2>
+        <p>Start a NATS server:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span>docker run -p </span><span class="number-literal">4222</span><span>:</span><span class="number-literal">4222</span><span> nats:latest</span></code></pre>
+        <p>The snippets below share these imports and helpers:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">comcast</span><span>.</span><span class="identifier">ip4s</span><span>.{</span><span class="type-name">Host</span><span>, </span><span class="type-name">Port</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="type-name">Chunk</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">client</span><span>.{</span><span class="type-name">ClientConfig</span><span>, </span><span class="type-name">ClientEvent</span><span>, </span><span class="type-name">NatsClient</span><span>}
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">protocol</span><span>.</span><span class="type-name">Headers</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">subscriptions</span><span>.</span><span class="type-name">NatsMessage</span><span>
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">host</span><span> = </span><span class="type-name">Host</span><span>.</span><span class="identifier">fromString</span><span>(</span><span class="string-literal">&quot;localhost&quot;</span><span>).</span><span class="identifier">get</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">port</span><span> = </span><span class="type-name">Port</span><span>.</span><span class="identifier">fromInt</span><span>(</span><span class="number-literal">4222</span><span>).</span><span class="identifier">get</span><span>
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">processWork</span><span>(</span><span class="identifier">msg</span><span>: </span><span class="type-name">NatsMessage</span><span>): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] = </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;processing </span><span class="substitution">${msg.subject}</span><span class="string-literal">&quot;</span><span>)</span></code></pre>
+        
+        <h2 id="basic-usage" class="section"><a class="anchor-link left" href="#basic-usage"><i class="icofont-laika link">&#xef71;</i></a>Basic usage</h2>
+        <p><code>NatsClient.connect</code> hands you the client as a <code>Resource</code>; a subscription is in
+        turn a <code>Resource</code> over an <code>fs2.Stream[F, NatsMessage]</code>. Nothing connects or
+        subscribes until the <code>Resource</code> is used.</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">config</span><span> = </span><span class="type-name">ClientConfig</span><span>(</span><span class="identifier">host</span><span> = </span><span class="identifier">host</span><span>, </span><span class="identifier">port</span><span> = </span><span class="identifier">port</span><span>)
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">program</span><span>: </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="type-name">NatsClient</span><span>.</span><span class="identifier">connect</span><span>[</span><span class="type-name">IO</span><span>](</span><span class="identifier">config</span><span>).</span><span class="identifier">use</span><span> { </span><span class="identifier">client</span><span> =&gt;
+    </span><span class="identifier">client</span><span>.</span><span class="identifier">subscribe</span><span>(</span><span class="string-literal">&quot;hello.world&quot;</span><span>).</span><span class="identifier">use</span><span> { </span><span class="identifier">messages</span><span> =&gt;
+      </span><span class="keyword">for</span><span>
+        </span><span class="identifier">_</span><span>   &lt;- </span><span class="identifier">client</span><span>.</span><span class="identifier">publish</span><span>(</span><span class="string-literal">&quot;hello.world&quot;</span><span>, </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;Hello, NATS!&quot;</span><span>.</span><span class="identifier">getBytes</span><span>))
+        </span><span class="identifier">msg</span><span> &lt;- </span><span class="identifier">messages</span><span>.</span><span class="identifier">take</span><span>(</span><span class="number-literal">1</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">lastOrError</span><span>
+        </span><span class="identifier">_</span><span>   &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Received: </span><span class="substitution">${msg.payloadAsString}</span><span class="string-literal">&quot;</span><span>)
+      </span><span class="keyword">yield</span><span> ()
+    }
+  }</span></code></pre>
+        
+        <h2 id="publishing-with-headers" class="section"><a class="anchor-link left" href="#publishing-with-headers"><i class="icofont-laika link">&#xef71;</i></a>Publishing with headers</h2>
+        <p>NATS 2.2+ headers are first class. Build a <code>Headers</code> value and pass it to
+        <code>publish</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">publishWithHeaders</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="keyword">val</span><span> </span><span class="identifier">headers</span><span> = </span><span class="type-name">Headers</span><span>(
+    </span><span class="string-literal">&quot;X-Request-Id&quot;</span><span> -&gt; </span><span class="string-literal">&quot;abc123&quot;</span><span>,
+    </span><span class="string-literal">&quot;X-Timestamp&quot;</span><span>  -&gt; </span><span class="type-name">System</span><span>.</span><span class="identifier">currentTimeMillis</span><span>().</span><span class="identifier">toString</span><span>
+  )
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">publish</span><span>(</span><span class="string-literal">&quot;events.created&quot;</span><span>, </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;&quot;&quot;{&quot;id&quot;: 1}&quot;&quot;&quot;</span><span>.</span><span class="identifier">getBytes</span><span>), </span><span class="identifier">headers</span><span>)</span></code></pre>
+        
+        <h2 id="wildcard-subscriptions" class="section"><a class="anchor-link left" href="#wildcard-subscriptions"><i class="icofont-laika link">&#xef71;</i></a>Wildcard subscriptions</h2>
+        <p><code>*</code> matches a single token; <code>&gt;</code> matches one or more trailing tokens:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="comment">// Subscribe to all events under events.*
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">singleToken</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">subscribe</span><span>(</span><span class="string-literal">&quot;events.*&quot;</span><span>).</span><span class="identifier">use</span><span> { </span><span class="identifier">messages</span><span> =&gt;
+    </span><span class="identifier">messages</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">msg</span><span> =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${msg.subject}</span><span class="string-literal">: </span><span class="substitution">${msg.payloadAsString}</span><span class="string-literal">&quot;</span><span>)).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+  }
+
+</span><span class="comment">// Subscribe to events.a, events.a.b, events.a.b.c, ...
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">multiToken</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">subscribe</span><span>(</span><span class="string-literal">&quot;events.&gt;&quot;</span><span>).</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>)</span></code></pre>
+        
+        <h2 id="queue-groups-load-balancing" class="section"><a class="anchor-link left" href="#queue-groups-load-balancing"><i class="icofont-laika link">&#xef71;</i></a>Queue groups (load balancing)</h2>
+        <p>Subscribers sharing a queue group split the messages between them:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">worker</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">subscribe</span><span>(</span><span class="string-literal">&quot;work.queue&quot;</span><span>, </span><span class="identifier">queueGroup</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;workers&quot;</span><span>)).</span><span class="identifier">use</span><span> { </span><span class="identifier">messages</span><span> =&gt;
+    </span><span class="identifier">messages</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">processWork</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+  }</span></code></pre>
+        
+        <h2 id="connection-events" class="section"><a class="anchor-link left" href="#connection-events"><i class="icofont-laika link">&#xef71;</i></a>Connection events</h2>
+        <p><code>client.events</code> is a <code>Stream[F, ClientEvent]</code> reporting connection lifecycle,
+        slow consumers, and protocol errors:</p>
+        <pre><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">watchEvents</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">events</span><span>.</span><span class="identifier">evalMap</span><span> {
+    </span><span class="keyword">case</span><span> </span><span class="type-name">ClientEvent</span><span>.</span><span class="type-name">Connected</span><span>(</span><span class="identifier">info</span><span>) =&gt;
+      </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Connected to </span><span class="substitution">${info.serverId}</span><span class="string-literal">&quot;</span><span>)
+    </span><span class="keyword">case</span><span> </span><span class="type-name">ClientEvent</span><span>.</span><span class="type-name">Disconnected</span><span>(</span><span class="identifier">reason</span><span>, </span><span class="identifier">willReconnect</span><span>) =&gt;
+      </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Disconnected: </span><span class="substitution">$reason</span><span class="string-literal">, reconnecting: </span><span class="substitution">$willReconnect</span><span class="string-literal">&quot;</span><span>)
+    </span><span class="keyword">case</span><span> </span><span class="type-name">ClientEvent</span><span>.</span><span class="type-name">Reconnected</span><span>(</span><span class="identifier">info</span><span>, </span><span class="identifier">attempt</span><span>) =&gt;
+      </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Reconnected to </span><span class="substitution">${info.serverId}</span><span class="string-literal"> after </span><span class="substitution">$attempt</span><span class="string-literal"> attempts&quot;</span><span>)
+    </span><span class="keyword">case</span><span> </span><span class="type-name">ClientEvent</span><span>.</span><span class="type-name">SlowConsumer</span><span>(</span><span class="identifier">sid</span><span>, </span><span class="identifier">subject</span><span>, </span><span class="identifier">dropped</span><span>) =&gt;
+      </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Slow consumer on </span><span class="substitution">$subject</span><span class="string-literal">, dropped </span><span class="substitution">$dropped</span><span class="string-literal"> messages&quot;</span><span>)
+    </span><span class="keyword">case</span><span> </span><span class="identifier">other</span><span> =&gt;
+      </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Event: </span><span class="substitution">$other</span><span class="string-literal">&quot;</span><span>)
+  }.</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span></code></pre>
+        
+        <h2 id="request-reply" class="section"><a class="anchor-link left" href="#request-reply"><i class="icofont-laika link">&#xef71;</i></a>Request/Reply</h2>
+        <p><code>request</code> publishes to a shared response inbox and awaits a single reply. It
+        fails fast with <code>NatsError.NoResponders</code> if nobody is listening (503), or
+        <code>NatsError.Timeout</code> if no reply arrives within the timeout:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">echo</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">NatsMessage</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">request</span><span>(</span><span class="string-literal">&quot;service.echo&quot;</span><span>, </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;ping&quot;</span><span>.</span><span class="identifier">getBytes</span><span>))</span></code></pre>
+        <p>Next up: <a href="jetstream.html">JetStream</a> for persistence and consumers.</p>
+
+        
+<hr class="footer-rule"/>
+<footer>
+  Site generated by <a href="https://typelevel.org/Laika/">Laika</a> with the Helium theme.
+</footer>
+
+
+      </main>
+
+    </div>
+
+  </body>
+
+</html>
