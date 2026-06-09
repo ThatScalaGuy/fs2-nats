@@ -1,0 +1,418 @@
+/*
+ * Copyright 2025 ThatScalaGuy
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package fs2.nats.protocol
+
+import cats.effect.Async
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import fs2.{Chunk, Pipe, Pull, Stream}
+import java.nio.charset.StandardCharsets
+import scala.util.{Failure, Success, Try}
+
+/** Frozen, verbatim copy of `ProtocolParser` as of the v0.2.0 implementation
+  * (the immutable `Chunk ++ / take / drop` carry). Used ONLY as the A/B
+  * correctness oracle for [[ProtocolParserPropSpec]] — the new flat-array
+  * `ProtocolParser` must produce frame-for-frame identical output for every
+  * input split. Delete this file once the rewrite has been validated and
+  * released.
+  *
+  * This file intentionally does NOT redefine `ParserConfig` — it reuses the
+  * production one from `ProtocolParser.scala`.
+  */
+object ReferenceProtocolParser:
+
+  private val CR: Byte = '\r'.toByte
+  private val LF: Byte = '\n'.toByte
+
+  def parseStream[F[_]: Async]: Pipe[F, Byte, NatsFrame] =
+    parseStream(ParserConfig.default)
+
+  def parseStream[F[_]: Async](config: ParserConfig): Pipe[F, Byte, NatsFrame] =
+    input => parseLoop(config, Chunk.empty, input).stream
+
+  private def parseLoop[F[_]: Async](
+      config: ParserConfig,
+      buffer: Chunk[Byte],
+      input: Stream[F, Byte]
+  ): Pull[F, NatsFrame, Unit] =
+    findCrlf(buffer) match
+      case Some(crlfIdx) =>
+        val controlLine = buffer.take(crlfIdx)
+        val remaining = buffer.drop(crlfIdx + 2)
+
+        if controlLine.size > config.maxControlLineLength then
+          emitParseError(
+            config,
+            s"Control line exceeds maximum length of ${config.maxControlLineLength}"
+          )
+        else parseControlLine(config, controlLine, remaining, input)
+
+      case None =>
+        if buffer.size > config.maxControlLineLength then
+          emitParseError(
+            config,
+            s"Control line exceeds maximum length of ${config.maxControlLineLength}"
+          )
+        else
+          input.pull.uncons.flatMap {
+            case Some((chunk, rest)) =>
+              parseLoop(config, buffer ++ chunk, rest)
+            case None =>
+              if buffer.isEmpty then Pull.done
+              else if config.strictMode then
+                Pull.raiseError(
+                  fs2.nats.errors.NatsError.ProtocolParseError(
+                    "Incomplete control line at end of stream"
+                  )
+                )
+              else
+                Pull.output1(
+                  NatsFrame.ParseErrorFrame(
+                    "Incomplete control line at end of stream"
+                  )
+                ) >> Pull.done
+          }
+
+  private def parseControlLine[F[_]: Async](
+      config: ParserConfig,
+      controlLine: Chunk[Byte],
+      remaining: Chunk[Byte],
+      input: Stream[F, Byte]
+  ): Pull[F, NatsFrame, Unit] =
+    val tokens = tokenize(controlLine)
+
+    tokens.headOption.map(_.toUpperCase) match
+      case Some("INFO") =>
+        parseInfoFrame(config, decodeLine(controlLine), remaining, input)
+
+      case Some("MSG") =>
+        parseMsgFrame(config, tokens, remaining, input)
+
+      case Some("HMSG") =>
+        parseHMsgFrame(config, tokens, remaining, input)
+
+      case Some("PING") =>
+        Pull.output1(NatsFrame.PingFrame) >> parseLoop(config, remaining, input)
+
+      case Some("PONG") =>
+        Pull.output1(NatsFrame.PongFrame) >> parseLoop(config, remaining, input)
+
+      case Some("+OK") =>
+        Pull.output1(NatsFrame.OkFrame) >> parseLoop(config, remaining, input)
+
+      case Some("-ERR") =>
+        val msg =
+          decodeLine(controlLine).drop(4).trim.stripPrefix("'").stripSuffix("'")
+        Pull.output1(NatsFrame.ErrFrame(msg)) >> parseLoop(
+          config,
+          remaining,
+          input
+        )
+
+      case Some(cmd) =>
+        emitParseError(config, s"Unrecognized command: $cmd")
+
+      case None =>
+        parseLoop(config, remaining, input)
+
+  private def parseInfoFrame[F[_]: Async](
+      config: ParserConfig,
+      line: String,
+      remaining: Chunk[Byte],
+      input: Stream[F, Byte]
+  ): Pull[F, NatsFrame, Unit] =
+    val jsonStr = line.drop(5).trim
+    Try(readFromString[Info](jsonStr)) match
+      case Success(info) =>
+        Pull.output1(NatsFrame.InfoFrame(info)) >> parseLoop(
+          config,
+          remaining,
+          input
+        )
+      case Failure(err) =>
+        emitParseError(config, s"Failed to parse INFO JSON: ${err.getMessage}")
+
+  private def parseMsgFrame[F[_]: Async](
+      config: ParserConfig,
+      tokens: Vector[String],
+      remaining: Chunk[Byte],
+      input: Stream[F, Byte]
+  ): Pull[F, NatsFrame, Unit] =
+    tokens match
+      case Vector("MSG", subject, sidStr, replyTo, lengthStr) =>
+        (parseLong(sidStr), parseInt(lengthStr)) match
+          case (Some(sid), Some(length)) =>
+            validatePayloadLength(config, length) match
+              case Some(errPull) => errPull
+              case None          =>
+                readPayload(config, remaining, input, length).flatMap {
+                  case (payload, afterPayload, stream) =>
+                    Pull.output1(
+                      NatsFrame.MsgFrame(subject, sid, Some(replyTo), payload)
+                    ) >>
+                      parseLoop(config, afterPayload, stream)
+                }
+          case _ =>
+            emitParseError(
+              config,
+              s"Invalid MSG frame: ${tokens.mkString(" ")}"
+            )
+
+      case Vector("MSG", subject, sidStr, lengthStr) =>
+        (parseLong(sidStr), parseInt(lengthStr)) match
+          case (Some(sid), Some(length)) =>
+            validatePayloadLength(config, length) match
+              case Some(errPull) => errPull
+              case None          =>
+                readPayload(config, remaining, input, length).flatMap {
+                  case (payload, afterPayload, stream) =>
+                    Pull.output1(
+                      NatsFrame.MsgFrame(subject, sid, None, payload)
+                    ) >>
+                      parseLoop(config, afterPayload, stream)
+                }
+          case _ =>
+            emitParseError(
+              config,
+              s"Invalid MSG frame: ${tokens.mkString(" ")}"
+            )
+
+      case _ =>
+        emitParseError(
+          config,
+          s"Invalid MSG frame format: ${tokens.mkString(" ")}"
+        )
+
+  private def parseHMsgFrame[F[_]: Async](
+      config: ParserConfig,
+      tokens: Vector[String],
+      remaining: Chunk[Byte],
+      input: Stream[F, Byte]
+  ): Pull[F, NatsFrame, Unit] =
+    tokens match
+      case Vector(
+            "HMSG",
+            subject,
+            sidStr,
+            replyTo,
+            headerLenStr,
+            totalLenStr
+          ) =>
+        (parseLong(sidStr), parseInt(headerLenStr), parseInt(totalLenStr)) match
+          case (Some(sid), Some(headerLen), Some(totalLen)) =>
+            validatePayloadLength(config, totalLen.toLong) match
+              case Some(errPull) => errPull
+              case None          =>
+                readHMsgPayload(
+                  config,
+                  remaining,
+                  input,
+                  subject,
+                  sid,
+                  Some(replyTo),
+                  headerLen,
+                  totalLen
+                )
+          case _ =>
+            emitParseError(
+              config,
+              s"Invalid HMSG frame: ${tokens.mkString(" ")}"
+            )
+
+      case Vector("HMSG", subject, sidStr, headerLenStr, totalLenStr) =>
+        (parseLong(sidStr), parseInt(headerLenStr), parseInt(totalLenStr)) match
+          case (Some(sid), Some(headerLen), Some(totalLen)) =>
+            validatePayloadLength(config, totalLen.toLong) match
+              case Some(errPull) => errPull
+              case None          =>
+                readHMsgPayload(
+                  config,
+                  remaining,
+                  input,
+                  subject,
+                  sid,
+                  None,
+                  headerLen,
+                  totalLen
+                )
+          case _ =>
+            emitParseError(
+              config,
+              s"Invalid HMSG frame: ${tokens.mkString(" ")}"
+            )
+
+      case _ =>
+        emitParseError(
+          config,
+          s"Invalid HMSG frame format: ${tokens.mkString(" ")}"
+        )
+
+  private def readHMsgPayload[F[_]: Async](
+      config: ParserConfig,
+      remaining: Chunk[Byte],
+      input: Stream[F, Byte],
+      subject: String,
+      sid: Long,
+      replyTo: Option[String],
+      headerLen: Int,
+      totalLen: Int
+  ): Pull[F, NatsFrame, Unit] =
+    readPayload(config, remaining, input, totalLen).flatMap {
+      case (fullPayload, afterPayload, stream) =>
+        val headerBytes = fullPayload.take(headerLen)
+        val payloadBytes = fullPayload.drop(headerLen)
+
+        Headers.parseWithStatus(headerBytes) match
+          case Right((statusCode, statusDescription, headers)) =>
+            Pull.output1(
+              NatsFrame.HMsgFrame(
+                subject,
+                sid,
+                replyTo,
+                headers,
+                statusCode,
+                statusDescription,
+                payloadBytes
+              )
+            ) >>
+              parseLoop(config, afterPayload, stream)
+          case Left(err) =>
+            emitParseError(config, s"Failed to parse HMSG headers: $err")
+    }
+
+  private def readPayload[F[_]: Async](
+      config: ParserConfig,
+      buffer: Chunk[Byte],
+      input: Stream[F, Byte],
+      length: Int
+  ): Pull[F, Nothing, (Chunk[Byte], Chunk[Byte], Stream[F, Byte])] =
+    val needed = length + 2
+
+    def accumulate(
+        buf: Chunk[Byte],
+        stream: Stream[F, Byte]
+    ): Pull[F, Nothing, (Chunk[Byte], Chunk[Byte], Stream[F, Byte])] =
+      if buf.size >= needed then
+        val payload = buf.take(length)
+        val afterPayload = buf.drop(length)
+
+        if afterPayload.size >= 2 then
+          val crlf = afterPayload.take(2)
+          if crlf(0) == CR && crlf(1) == LF then
+            Pull.pure((payload, afterPayload.drop(2), stream))
+          else if config.strictCRLF then
+            Pull.raiseError(
+              fs2.nats.errors.NatsError.ProtocolParseError(
+                s"Missing CRLF after payload (got 0x${String.format("%02x", crlf(0))} 0x${String.format("%02x", crlf(1))})"
+              )
+            )
+          else Pull.pure((payload, afterPayload.drop(2), stream))
+        else
+          stream.pull.uncons.flatMap {
+            case Some((chunk, rest)) =>
+              accumulate(buf ++ chunk, rest)
+            case None =>
+              Pull.raiseError(
+                fs2.nats.errors.NatsError.ProtocolParseError(
+                  "Unexpected end of stream while reading payload CRLF"
+                )
+              )
+          }
+      else
+        stream.pull.uncons.flatMap {
+          case Some((chunk, rest)) =>
+            accumulate(buf ++ chunk, rest)
+          case None =>
+            Pull.raiseError(
+              fs2.nats.errors.NatsError.ProtocolParseError(
+                s"Unexpected end of stream while reading payload (expected $length bytes)"
+              )
+            )
+        }
+
+    accumulate(buffer, input)
+
+  private def validatePayloadLength[F[_]: Async](
+      config: ParserConfig,
+      length: Long
+  ): Option[Pull[F, NatsFrame, Unit]] =
+    config.maxPayloadLimit match
+      case Some(max) if length > max =>
+        Some(
+          emitParseError(
+            config,
+            s"Payload size $length exceeds maximum of $max"
+          )
+        )
+      case _ if length < 0 =>
+        Some(
+          emitParseError(config, s"Invalid negative payload length: $length")
+        )
+      case _ =>
+        None
+
+  private def emitParseError[F[_]: Async](
+      config: ParserConfig,
+      message: String
+  ): Pull[F, NatsFrame, Unit] =
+    if config.strictMode then
+      Pull.raiseError(fs2.nats.errors.NatsError.ProtocolParseError(message))
+    else Pull.output1(NatsFrame.ParseErrorFrame(message)) >> Pull.done
+
+  private def findCrlf(chunk: Chunk[Byte]): Option[Int] =
+    val sl = chunk.toArraySlice[Byte]
+    val values = sl.values
+    val base = sl.offset
+    val limit = base + sl.length - 1
+    var i = base
+    while i < limit do
+      if values(i) == CR && values(i + 1) == LF then return Some(i - base)
+      i += 1
+    None
+
+  private def isSpace(b: Byte): Boolean =
+    b == ' '.toByte || b == '\t'.toByte
+
+  private def decodeLine(chunk: Chunk[Byte]): String =
+    val sl = chunk.toArraySlice[Byte]
+    new String(sl.values, sl.offset, sl.length, StandardCharsets.UTF_8)
+
+  private def tokenize(chunk: Chunk[Byte]): Vector[String] =
+    val sl = chunk.toArraySlice[Byte]
+    val arr = sl.values
+    val end = sl.offset + sl.length
+    val builder = Vector.newBuilder[String]
+    var i = sl.offset
+    while i < end do
+      while i < end && isSpace(arr(i)) do i += 1
+      if i < end then
+        val tokenStart = i
+        while i < end && !isSpace(arr(i)) do i += 1
+        builder += new String(
+          arr,
+          tokenStart,
+          i - tokenStart,
+          StandardCharsets.UTF_8
+        )
+    builder.result()
+
+  private def parseInt(s: String): Option[Int] =
+    try Some(s.toInt)
+    catch case _: NumberFormatException => None
+
+  private def parseLong(s: String): Option[Long] =
+    try Some(s.toLong)
+    catch case _: NumberFormatException => None
