@@ -247,6 +247,9 @@ object NatsClient:
   ) extends fs2.nats.transport.Transport[F]:
     override def frames: Stream[F, NatsFrame] = connManager.frames
     override def send(bytes: Chunk[Byte]): F[Unit] = connManager.send(bytes)
+    override def sendOutgoing(
+        out: fs2.nats.transport.Outgoing
+    ): F[Unit] = connManager.sendOutgoing(out)
     override def close: F[Unit] = connManager.close
     override def isConnected: F[Boolean] =
       connManager.transport.flatMap(_.isConnected).handleError(_ => false)

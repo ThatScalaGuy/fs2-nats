@@ -53,6 +53,18 @@ trait Transport[F[_]]:
     */
   def send(bytes: Chunk[Byte]): F[Unit]
 
+  /** Enqueue an outbound write described by an [[Outgoing]] descriptor. The
+    * single writer fiber assembles it (header + payload, no per-publish
+    * combined array) into its reused buffer at write time. `send` is the
+    * special case of a fully-built [[Outgoing.Raw]] frame.
+    *
+    * @param out
+    *   The write descriptor
+    * @return
+    *   Effect that completes when the descriptor is enqueued
+    */
+  def sendOutgoing(out: Outgoing): F[Unit]
+
   /** Close the transport and release all resources. After closing, all
     * operations will fail.
     *
@@ -70,13 +82,6 @@ trait Transport[F[_]]:
 
 object Transport:
 
-  /** Sentinel enqueued to terminate a transport's writer drain loop. Compared
-    * by reference identity (`ne`), so real frames need not be boxed in an
-    * `Option` just to carry an out-of-band end-of-stream signal — a queued
-    * frame is always a distinct `Chunk` instance, so `eq` never collides.
-    */
-  private[transport] val WriterPoison: Chunk[Byte] = Chunk.singleton(0.toByte)
-
   /** Initial capacity of a writer's reusable coalescing buffer. Sized so a
     * typical drain never has to grow it; a single oversized message grows it
     * once and the larger buffer is retained for the connection's lifetime.
@@ -84,11 +89,13 @@ object Transport:
   private val InitialWriteBufferCapacity: Int = 64 * 1024
 
   /** A growable byte buffer, reused across the writer's drain cycles and owned
-    * by the single writer fiber. [[fill]] copies a drained batch of frames into
-    * the buffer once and returns a Chunk viewing the filled prefix, so the
-    * whole batch is flushed in one `socket.write` (one syscall) without
-    * allocating a fresh array per drain. A single-element drain (the common
-    * low-load case) bypasses this entirely and is written as-is.
+    * by the single writer fiber. [[fill]] assembles a drained batch of
+    * [[Outgoing]] descriptors into the buffer once and returns a Chunk viewing
+    * the filled prefix, so the whole batch is flushed in one `socket.write`
+    * (one syscall) without allocating a fresh array per drain. A `Pub`/`HPub`
+    * descriptor's payload is copied here exactly once (its only copy). A
+    * single-element drain that is already a fully-built [[Outgoing.Raw]] frame
+    * (the common low-load case) bypasses this entirely and is written as-is.
     *
     * Safety: the returned Chunk aliases the buffer, but the writer processes
     * one batch at a time — `socket.write` fully consumes the Chunk before the
@@ -98,7 +105,7 @@ object Transport:
   private[transport] final class WriteBuffer:
     private var buf: Array[Byte] = new Array[Byte](InitialWriteBufferCapacity)
 
-    def fill(batch: Chunk[Chunk[Byte]]): Chunk[Byte] =
+    def fill(batch: Chunk[Outgoing]): Chunk[Byte] =
       var total = 0
       var i = 0
       while i < batch.size do
@@ -108,9 +115,7 @@ object Transport:
       var off = 0
       i = 0
       while i < batch.size do
-        val c = batch(i)
-        c.copyToArray(buf, off)
-        off += c.size
+        off = batch(i).copyInto(buf, off)
         i += 1
       Chunk.array(buf, 0, total)
 
@@ -129,7 +134,7 @@ object Transport:
     */
   private[transport] def startWriter[F[_]: Async](
       socket: Socket[F],
-      writeQueue: Queue[F, Chunk[Byte]],
+      writeQueue: Queue[F, Outgoing],
       connectedRef: Ref[F, Boolean],
       config: TransportConfig
   ): Resource[F, Unit] =
@@ -139,11 +144,20 @@ object Transport:
         .flatMap { wb =>
           Stream
             .fromQueueUnterminated(writeQueue)
-            .takeWhile(_ ne WriterPoison)
+            .takeWhile(_ ne Outgoing.Poison)
             .chunks
             .foreach { batch =>
               Async[F]
-                .delay(if batch.size == 1 then batch(0) else wb.fill(batch))
+                .delay {
+                  // A lone, already-complete Raw frame is written as-is; a lone
+                  // Pub/HPub still needs its header + payload assembled, so it
+                  // goes through the reused buffer like any multi-frame batch.
+                  if batch.size == 1 then
+                    batch(0) match
+                      case Outgoing.Raw(c) => c
+                      case _               => wb.fill(batch)
+                  else wb.fill(batch)
+                }
                 .flatMap { out =>
                   Async[F].timeoutTo(
                     socket.write(out),
@@ -165,6 +179,6 @@ object Transport:
 
     Resource
       .make(Async[F].start(writerFiber))(_ =>
-        writeQueue.offer(WriterPoison) *> Async[F].unit
+        writeQueue.offer(Outgoing.Poison) *> Async[F].unit
       )
       .void

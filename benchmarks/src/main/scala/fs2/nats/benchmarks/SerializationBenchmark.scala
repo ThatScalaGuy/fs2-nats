@@ -19,6 +19,7 @@ package fs2.nats.benchmarks
 import fs2.Chunk
 import fs2.nats.protocol.Headers
 import fs2.nats.publish.SerializationUtils
+import fs2.nats.transport.Outgoing
 import org.openjdk.jmh.annotations.*
 import java.util.concurrent.TimeUnit
 
@@ -61,3 +62,44 @@ class SerializationBenchmark:
   @Benchmark
   def buildHPub_16(): Chunk[Byte] =
     SerializationUtils.buildHPub(subject, None, headerBytes, payload16)
+
+  // --- P1.4: the descriptor path replaces each buildPub/buildHPub above. It
+  // allocates only the small control-line header + the descriptor object and
+  // references the existing payload Chunk, so its bytes/op is ~constant in the
+  // payload size (compare pubDescriptor_16 vs pubDescriptor_256 against
+  // buildPub_16 vs buildPub_256). The payload copy that buildPub did is moved
+  // to the writer's reused buffer and so is no longer allocated here. ---
+
+  @Benchmark
+  def pubDescriptor_16(): Outgoing =
+    Outgoing.Pub(
+      SerializationUtils.buildPubHeader(subject, None, payload16.size),
+      payload16
+    )
+
+  @Benchmark
+  def pubDescriptor_256(): Outgoing =
+    Outgoing.Pub(
+      SerializationUtils.buildPubHeader(subject, None, payload256.size),
+      payload256
+    )
+
+  @Benchmark
+  def pubDescriptor_replyTo_16(): Outgoing =
+    Outgoing.Pub(
+      SerializationUtils.buildPubHeader(subject, replyTo, payload16.size),
+      payload16
+    )
+
+  @Benchmark
+  def hpubDescriptor_16(): Outgoing =
+    Outgoing.HPub(
+      SerializationUtils.buildHPubHeader(
+        subject,
+        None,
+        headerBytes.size,
+        headerBytes.size + payload16.size
+      ),
+      headerBytes,
+      payload16
+    )

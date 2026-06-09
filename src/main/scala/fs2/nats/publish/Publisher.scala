@@ -20,7 +20,7 @@ import cats.effect.Async
 import fs2.Chunk
 import fs2.nats.errors.NatsError
 import fs2.nats.protocol.Headers
-import fs2.nats.transport.Transport
+import fs2.nats.transport.{Outgoing, Transport}
 
 /** Publisher for sending messages to NATS subjects.
   *
@@ -123,8 +123,16 @@ object Publisher:
             if size > maxPayload then
               Async[F].raiseError(NatsError.PayloadTooLarge(size, maxPayload))
             else
-              transport.send(
-                SerializationUtils.buildPub(subject, replyTo, payload)
+              // Enqueue a descriptor: the small prebuilt PUB header plus a
+              // reference to the user's immutable payload Chunk. No combined
+              // frame array and no payload copy here — the writer copies the
+              // payload exactly once, into its reused buffer.
+              transport.sendOutgoing(
+                Outgoing.Pub(
+                  SerializationUtils
+                    .buildPubHeader(subject, replyTo, payload.size),
+                  payload
+                )
               )
       }
 
@@ -146,9 +154,20 @@ object Publisher:
                 NatsError.PayloadTooLarge(totalSize, maxPayload)
               )
             else
-              transport.send(
-                SerializationUtils
-                  .buildHPub(subject, replyTo, headerBytes, payload)
+              // As with `publish`, enqueue a descriptor referencing the
+              // immutable headers and payload Chunks rather than a combined
+              // HPUB frame array.
+              transport.sendOutgoing(
+                Outgoing.HPub(
+                  SerializationUtils.buildHPubHeader(
+                    subject,
+                    replyTo,
+                    headerBytes.size,
+                    headerBytes.size + payload.size
+                  ),
+                  headerBytes,
+                  payload
+                )
               )
       }
 
