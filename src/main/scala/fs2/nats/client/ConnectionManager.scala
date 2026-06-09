@@ -294,6 +294,24 @@ object ConnectionManager:
       }
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
+      // Fast path: `connRef.get` is a single volatile read (AtomicReference.get)
+      // with no allocation. When Online — the overwhelmingly common case — hand
+      // straight to the transport, skipping the `modify` CAS and its per-publish
+      // Either+Some+tuple allocation. `connRef` stays the single source of truth;
+      // a transition racing this read is the same best-effort window the old
+      // `modify`-then-`send` had. Offline/Closed fall through to the authoritative
+      // `modify` path, which also re-checks Online in case a reconnect raced us.
+      connRef.get.flatMap {
+        case ConnPhase.Online(t) => t.send(bytes)
+        case _                   => sendBuffered(bytes)
+      }
+
+    /** Slow path for the non-Online phases: atomically buffer (Offline), reject
+      * (Closed), or — if a reconnect transitioned us back Online between the
+      * `connRef.get` above and here — send directly. `connRef.modify` is the
+      * authoritative arbiter so concurrent sends never lose a buffered write.
+      */
+    private def sendBuffered(bytes: Chunk[Byte]): F[Unit] =
       connRef
         .modify[Either[NatsError, Option[Transport[F]]]] {
           case online @ ConnPhase.Online(t) =>
