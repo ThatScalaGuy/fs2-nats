@@ -56,6 +56,11 @@ lazy val root = project
     // implementation classes. These are not part of the public API; MiMa only
     // sees them because Scala emits nested private classes as separate classfiles.
     mimaBinaryIssueFilters ++= Seq(
+      // P1.1: `coalesce` was an internal (`private[transport]`) writer helper,
+      // now replaced by the reusable `Transport.WriteBuffer`. Never public API.
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.Transport.coalesce"
+      ),
       ProblemFilters.exclude[IncompatibleMethTypeProblem](
         "fs2.nats.publish.Publisher#PublisherImpl.this"
       ),

@@ -16,7 +16,11 @@
 
 package fs2.nats.transport
 
+import cats.effect.{Async, Ref, Resource}
+import cats.effect.std.Queue
+import cats.syntax.all.*
 import fs2.{Chunk, Stream}
+import fs2.io.net.Socket
 import fs2.nats.protocol.NatsFrame
 
 /** Transport abstraction for NATS socket communication.
@@ -66,34 +70,93 @@ trait Transport[F[_]]:
 
 object Transport:
 
-  /** Concatenate a batch of queued byte chunks into a single array-backed Chunk
-    * so the whole batch can be flushed to the socket in one write (one
-    * syscall).
-    *
-    * The writer drains all immediately-available frames as one batch;
-    * coalescing them here is what turns "one write per message" into "one write
-    * per drain cycle". A single-element batch (the common low-load case) is
-    * returned as-is, avoiding any copy.
-    *
-    * @param batch
-    *   The frames dequeued together, each a complete protocol message
-    * @return
-    *   A single contiguous Chunk containing every frame in order
+  /** Initial capacity of a writer's reusable coalescing buffer. Sized so a
+    * typical drain never has to grow it; a single oversized message grows it
+    * once and the larger buffer is retained for the connection's lifetime.
     */
-  private[transport] def coalesce(batch: Chunk[Chunk[Byte]]): Chunk[Byte] =
-    if batch.size == 1 then batch(0)
-    else
+  private val InitialWriteBufferCapacity: Int = 64 * 1024
+
+  /** A growable byte buffer, reused across the writer's drain cycles and owned
+    * by the single writer fiber. [[fill]] copies a drained batch of frames into
+    * the buffer once and returns a Chunk viewing the filled prefix, so the
+    * whole batch is flushed in one `socket.write` (one syscall) without
+    * allocating a fresh array per drain. A single-element drain (the common
+    * low-load case) bypasses this entirely and is written as-is.
+    *
+    * Safety: the returned Chunk aliases the buffer, but the writer processes
+    * one batch at a time — `socket.write` fully consumes the Chunk before the
+    * next [[fill]] overwrites the buffer — so the buffer never escapes the
+    * fiber and is never mutated while a write is in flight.
+    */
+  private[transport] final class WriteBuffer:
+    private var buf: Array[Byte] = new Array[Byte](InitialWriteBufferCapacity)
+
+    def fill(batch: Chunk[Chunk[Byte]]): Chunk[Byte] =
       var total = 0
       var i = 0
       while i < batch.size do
         total += batch(i).size
         i += 1
-      val arr = new Array[Byte](total)
+      if total > buf.length then buf = new Array[Byte](total)
       var off = 0
       i = 0
       while i < batch.size do
         val c = batch(i)
-        c.copyToArray(arr, off)
+        c.copyToArray(buf, off)
         off += c.size
         i += 1
-      Chunk.array(arr)
+      Chunk.array(buf, 0, total)
+
+  /** Start the single writer fiber for a transport.
+    *
+    * Drains the write queue in batches (`fromQueueNoneTerminated` blocks for
+    * the first element then sweeps up everything immediately available),
+    * coalesces each batch into the reusable [[WriteBuffer]], and flushes it in
+    * one `socket.write`. Each write is bounded by `writeTimeout` so a stalled
+    * socket (dead peer, full send buffer) fails the writer and triggers
+    * reconnect instead of hanging; the timeout is per drain, i.e. amortized
+    * over the whole coalesced batch, not per message. On any error the
+    * transport is marked disconnected and the error re-raised. The returned
+    * Resource supervises the fiber and, on release, pushes the `None` poison
+    * pill to terminate it.
+    */
+  private[transport] def startWriter[F[_]: Async](
+      socket: Socket[F],
+      writeQueue: Queue[F, Option[Chunk[Byte]]],
+      connectedRef: Ref[F, Boolean],
+      config: TransportConfig
+  ): Resource[F, Unit] =
+    val writerFiber =
+      Async[F]
+        .delay(new WriteBuffer)
+        .flatMap { wb =>
+          Stream
+            .fromQueueNoneTerminated(writeQueue)
+            .chunks
+            .foreach { batch =>
+              Async[F]
+                .delay(if batch.size == 1 then batch(0) else wb.fill(batch))
+                .flatMap { out =>
+                  Async[F].timeoutTo(
+                    socket.write(out),
+                    config.writeTimeout,
+                    Async[F].raiseError(
+                      fs2.nats.errors.NatsError
+                        .ConnectionFailed("Write timed out")
+                    )
+                  )
+                }
+            }
+            .compile
+            .drain
+        }
+        .handleErrorWith { err =>
+          connectedRef.set(false) *>
+            Async[F].raiseError(err)
+        }
+
+    Resource
+      .make(Async[F].start(writerFiber))(_ =>
+        writeQueue.offer(None) *> Async[F].unit
+      )
+      .void

@@ -86,44 +86,13 @@ object TlsTransport:
         Queue.bounded[F, Option[Chunk[Byte]]](config.writeQueueCapacity)
       )
       connectedRef <- Resource.eval(Ref.of[F, Boolean](true))
-      _ <- startWriter(socket, writeQueue, connectedRef, config)
+      _ <- Transport.startWriter(socket, writeQueue, connectedRef, config)
     yield new TlsSocketTransport[F](
       socket,
       writeQueue,
       connectedRef,
       parserConfig
     )
-
-  private def startWriter[F[_]: Async](
-      socket: TLSSocket[F],
-      writeQueue: Queue[F, Option[Chunk[Byte]]],
-      connectedRef: Ref[F, Boolean],
-      config: TransportConfig
-  ): Resource[F, Unit] =
-    val writerFiber = Stream
-      .fromQueueNoneTerminated(writeQueue)
-      .chunks
-      .foreach(batch =>
-        Async[F].timeoutTo(
-          socket.write(Transport.coalesce(batch)),
-          config.writeTimeout,
-          Async[F].raiseError(
-            fs2.nats.errors.NatsError.ConnectionFailed("Write timed out")
-          )
-        )
-      )
-      .compile
-      .drain
-      .handleErrorWith { err =>
-        connectedRef.set(false) *>
-          Async[F].raiseError(err)
-      }
-
-    Resource
-      .make(Async[F].start(writerFiber))(_ =>
-        writeQueue.offer(None) *> Async[F].unit
-      )
-      .void
 
   private class TlsSocketTransport[F[_]: Async](
       socket: TLSSocket[F],
