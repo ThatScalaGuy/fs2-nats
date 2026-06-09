@@ -49,13 +49,61 @@ object ParserConfig:
   * Converts a raw Stream[F, Byte] into a Stream[F, NatsFrame] following the
   * NATS protocol specification. Handles partial reads, CRLF framing, and exact
   * N-byte payload reads for MSG/HMSG/PUB/HPUB commands.
+  *
+  * Carry strategy: instead of accumulating unconsumed bytes as an immutable
+  * `Chunk` (which turns into a `Chunk.Queue` after the first `++` and forces a
+  * full `toArray` materialization on every control-line scan — O(n²) under
+  * streaming load), the parser keeps a single growable `Array[Byte]` carry with
+  * `(start, end)` offsets. Each upstream chunk is `arraycopy`-ed in exactly
+  * once and all scanning runs over absolute array indices. The carry is owned
+  * by the single frame-reader fiber that runs the pipe (allocated fresh per
+  * materialization via `Stream.suspend`), and never escapes: every emitted
+  * payload/header is copied out into a fresh immutable `Chunk`.
   */
 object ProtocolParser:
 
   private val CR: Byte = '\r'.toByte
   private val LF: Byte = '\n'.toByte
-  // private val SPACE: Byte = ' '.toByte
-  // private val TAB: Byte = '\t'.toByte
+
+  /** Initial carry capacity; matches the typical fs2-io `socket.reads` chunk
+    * size so the common case never has to regrow.
+    */
+  private val InitialCapacity: Int = 8192
+
+  /** JVM max array length headroom; growth never produces an array larger than
+    * this (avoids `Int` overflow to a negative size).
+    */
+  private val MaxArray: Int = Int.MaxValue - 8
+
+  /** Mutable parse carry, confined to a single fiber. `[start, end)` is the
+    * live (not-yet-parsed) window into `carry`; bytes before `start` are
+    * consumed and bytes at/after `end` are garbage.
+    */
+  private final class ParserState(initialCapacity: Int):
+    var carry: Array[Byte] = new Array[Byte](initialCapacity)
+    var start: Int = 0
+    var end: Int = 0
+
+  /** Outcome of attempting to parse one frame from the current carry window. */
+  private sealed trait Step
+  private object Step:
+    /** A complete frame was parsed; `start` has already been advanced past it.
+      */
+    final case class Emit(frame: NatsFrame) extends Step
+
+    /** Not enough bytes for a control line yet — pull more input. */
+    case object NeedMoreControl extends Step
+
+    /** Control line parsed; waiting for a `length`-byte payload (+ CRLF). */
+    final case class NeedMorePayload(length: Int) extends Step
+
+    /** Recoverable protocol error: raise in strict mode, else emit a
+      * `ParseErrorFrame` and end the stream.
+      */
+    final case class FailSoft(message: String) extends Step
+
+    /** Hard protocol error: always raise, regardless of strict mode. */
+    final case class FailHard(message: String) extends Step
 
   /** Create a parsing pipe that transforms bytes into NATS frames.
     *
@@ -77,167 +125,257 @@ object ProtocolParser:
     *   A Pipe that parses bytes into NatsFrame values
     */
   def parseStream[F[_]: Async](config: ParserConfig): Pipe[F, Byte, NatsFrame] =
-    input => parseLoop(config, Chunk.empty, input).stream
+    input =>
+      Stream.suspend {
+        // Fresh carry per materialization, born inside the stream and owned by
+        // the single fiber that pulls it.
+        val state = new ParserState(InitialCapacity)
+        go(config, state, input).stream
+      }
 
-  private def parseLoop[F[_]: Async](
+  /** Drive parsing: emit as many complete frames as the current carry allows,
+    * pulling more input whenever a frame can't yet be completed.
+    */
+  private def go[F[_]: Async](
       config: ParserConfig,
-      buffer: Chunk[Byte],
+      st: ParserState,
       input: Stream[F, Byte]
   ): Pull[F, NatsFrame, Unit] =
-    findCrlf(buffer) match
-      case Some(crlfIdx) =>
-        val controlLine = buffer.take(crlfIdx)
-        val remaining = buffer.drop(crlfIdx + 2)
+    parseOne(config, st) match
+      case Step.Emit(frame) =>
+        Pull.output1(frame) >> go(config, st, input)
+      case Step.NeedMoreControl =>
+        needMore(config, st, input, -1)
+      case Step.NeedMorePayload(length) =>
+        needMore(config, st, input, length)
+      case Step.FailSoft(message) =>
+        emitParseError(config, message)
+      case Step.FailHard(message) =>
+        Pull.raiseError(fs2.nats.errors.NatsError.ProtocolParseError(message))
 
-        if controlLine.size > config.maxControlLineLength then
-          emitParseError(
-            config,
-            s"Control line exceeds maximum length of ${config.maxControlLineLength}"
+  /** Pull one more upstream chunk into the carry and resume, or handle EOF.
+    *
+    * @param payloadLen
+    *   `>= 0` if we were waiting on a payload of that length (so EOF is a
+    *   payload-truncation error), `-1` if we were waiting on a control line.
+    */
+  private def needMore[F[_]: Async](
+      config: ParserConfig,
+      st: ParserState,
+      input: Stream[F, Byte],
+      payloadLen: Int
+  ): Pull[F, NatsFrame, Unit] =
+    input.pull.uncons.flatMap {
+      case Some((chunk, rest)) =>
+        val live = st.end - st.start
+        if live.toLong + chunk.size.toLong > MaxArray.toLong then
+          Pull.raiseError(
+            fs2.nats.errors.NatsError.ProtocolParseError(
+              s"Frame exceeds maximum buffer size of $MaxArray bytes"
+            )
           )
-        else parseControlLine(config, controlLine, remaining, input)
+        else
+          appendChunk(st, chunk)
+          go(config, st, rest)
 
       case None =>
-        if buffer.size > config.maxControlLineLength then
-          emitParseError(
-            config,
+        if payloadLen >= 0 then
+          Pull.raiseError(
+            fs2.nats.errors.NatsError.ProtocolParseError(
+              s"Unexpected end of stream while reading payload (expected $payloadLen bytes)"
+            )
+          )
+        else if st.end == st.start then Pull.done
+        else if config.strictMode then
+          Pull.raiseError(
+            fs2.nats.errors.NatsError.ProtocolParseError(
+              "Incomplete control line at end of stream"
+            )
+          )
+        else
+          Pull.output1(
+            NatsFrame.ParseErrorFrame(
+              "Incomplete control line at end of stream"
+            )
+          ) >> Pull.done
+    }
+
+  /** Append an upstream chunk to the carry with a single `arraycopy`, growing
+    * (doubling) or compacting as needed. Caller guarantees `live + chunk.size`
+    * fits within `MaxArray`.
+    */
+  private def appendChunk(st: ParserState, chunk: Chunk[Byte]): Unit =
+    val n = chunk.size
+    if n > 0 then
+      ensureCapacity(st, n)
+      chunk.copyToArray(st.carry, st.end)
+      st.end += n
+
+  /** Guarantee room for `extra` more bytes at `end`. Compacts (slides the live
+    * window to index 0) before growing, so the carry stays bounded by the
+    * largest single in-flight frame rather than the cumulative stream size.
+    */
+  private def ensureCapacity(st: ParserState, extra: Int): Unit =
+    val live = st.end - st.start
+    val required = live + extra
+    if required <= st.carry.length then
+      if st.end + extra > st.carry.length then compact(st)
+    else
+      var newCap = st.carry.length
+      while newCap < required do newCap = growStep(newCap)
+      val next = new Array[Byte](newCap)
+      System.arraycopy(st.carry, st.start, next, 0, live)
+      st.carry = next
+      st.start = 0
+      st.end = live
+
+  private def compact(st: ParserState): Unit =
+    if st.start > 0 then
+      val live = st.end - st.start
+      System.arraycopy(st.carry, st.start, st.carry, 0, live)
+      st.start = 0
+      st.end = live
+
+  private def growStep(cur: Int): Int =
+    if cur >= MaxArray / 2 then MaxArray else cur * 2
+
+  /** Attempt to parse exactly one frame from `[start, end)`. Advances
+    * `st.start` past whatever it consumes (including skipped blank lines).
+    */
+  private def parseOne(config: ParserConfig, st: ParserState): Step =
+    var result: Step = null
+    while result == null do
+      val start = st.start
+      val crIdx = findCrlf(st.carry, start, st.end)
+      if crIdx < 0 then
+        if (st.end - start) > config.maxControlLineLength then
+          result = Step.FailSoft(
+            s"Control line exceeds maximum length of ${config.maxControlLineLength}"
+          )
+        else result = Step.NeedMoreControl
+      else
+        val controlLen = crIdx - start
+        if controlLen > config.maxControlLineLength then
+          result = Step.FailSoft(
             s"Control line exceeds maximum length of ${config.maxControlLineLength}"
           )
         else
-          input.pull.uncons.flatMap {
-            case Some((chunk, rest)) =>
-              parseLoop(config, buffer ++ chunk, rest)
+          val tokens = tokenize(st.carry, start, crIdx)
+          tokens.headOption.map(_.toUpperCase) match
             case None =>
-              if buffer.isEmpty then Pull.done
-              else if config.strictMode then
-                Pull.raiseError(
-                  fs2.nats.errors.NatsError.ProtocolParseError(
-                    "Incomplete control line at end of stream"
+              // Blank control line: skip past it and keep scanning.
+              st.start = crIdx + 2
+
+            case Some("INFO") =>
+              val jsonStr = decodeLine(st.carry, start, crIdx).drop(5).trim
+              Try(readFromString[Info](jsonStr)) match
+                case Success(info) =>
+                  st.start = crIdx + 2
+                  result = Step.Emit(NatsFrame.InfoFrame(info))
+                case Failure(err) =>
+                  result = Step.FailSoft(
+                    s"Failed to parse INFO JSON: ${err.getMessage}"
                   )
-                )
-              else
-                Pull.output1(
-                  NatsFrame.ParseErrorFrame(
-                    "Incomplete control line at end of stream"
-                  )
-                ) >> Pull.done
-          }
 
-  private def parseControlLine[F[_]: Async](
+            case Some("MSG") =>
+              result = handleMsg(config, st, tokens, crIdx)
+
+            case Some("HMSG") =>
+              result = handleHMsg(config, st, tokens, crIdx)
+
+            case Some("PING") =>
+              st.start = crIdx + 2
+              result = Step.Emit(NatsFrame.PingFrame)
+
+            case Some("PONG") =>
+              st.start = crIdx + 2
+              result = Step.Emit(NatsFrame.PongFrame)
+
+            case Some("+OK") =>
+              st.start = crIdx + 2
+              result = Step.Emit(NatsFrame.OkFrame)
+
+            case Some("-ERR") =>
+              val msg = decodeLine(st.carry, start, crIdx)
+                .drop(4)
+                .trim
+                .stripPrefix("'")
+                .stripSuffix("'")
+              st.start = crIdx + 2
+              result = Step.Emit(NatsFrame.ErrFrame(msg))
+
+            case Some(cmd) =>
+              result = Step.FailSoft(s"Unrecognized command: $cmd")
+    result
+
+  private def handleMsg(
       config: ParserConfig,
-      controlLine: Chunk[Byte],
-      remaining: Chunk[Byte],
-      input: Stream[F, Byte]
-  ): Pull[F, NatsFrame, Unit] =
-    val tokens = tokenize(controlLine)
-
-    tokens.headOption.map(_.toUpperCase) match
-      case Some("INFO") =>
-        parseInfoFrame(config, decodeLine(controlLine), remaining, input)
-
-      case Some("MSG") =>
-        parseMsgFrame(config, tokens, remaining, input)
-
-      case Some("HMSG") =>
-        parseHMsgFrame(config, tokens, remaining, input)
-
-      case Some("PING") =>
-        Pull.output1(NatsFrame.PingFrame) >> parseLoop(config, remaining, input)
-
-      case Some("PONG") =>
-        Pull.output1(NatsFrame.PongFrame) >> parseLoop(config, remaining, input)
-
-      case Some("+OK") =>
-        Pull.output1(NatsFrame.OkFrame) >> parseLoop(config, remaining, input)
-
-      case Some("-ERR") =>
-        val msg =
-          decodeLine(controlLine).drop(4).trim.stripPrefix("'").stripSuffix("'")
-        Pull.output1(NatsFrame.ErrFrame(msg)) >> parseLoop(
-          config,
-          remaining,
-          input
-        )
-
-      case Some(cmd) =>
-        emitParseError(config, s"Unrecognized command: $cmd")
-
-      case None =>
-        parseLoop(config, remaining, input)
-
-  private def parseInfoFrame[F[_]: Async](
-      config: ParserConfig,
-      line: String,
-      remaining: Chunk[Byte],
-      input: Stream[F, Byte]
-  ): Pull[F, NatsFrame, Unit] =
-    val jsonStr = line.drop(5).trim
-    Try(readFromString[Info](jsonStr)) match
-      case Success(info) =>
-        Pull.output1(NatsFrame.InfoFrame(info)) >> parseLoop(
-          config,
-          remaining,
-          input
-        )
-      case Failure(err) =>
-        emitParseError(config, s"Failed to parse INFO JSON: ${err.getMessage}")
-
-  private def parseMsgFrame[F[_]: Async](
-      config: ParserConfig,
+      st: ParserState,
       tokens: Vector[String],
-      remaining: Chunk[Byte],
-      input: Stream[F, Byte]
-  ): Pull[F, NatsFrame, Unit] =
+      crIdx: Int
+  ): Step =
     tokens match
       case Vector("MSG", subject, sidStr, replyTo, lengthStr) =>
         (parseLong(sidStr), parseInt(lengthStr)) match
           case (Some(sid), Some(length)) =>
-            validatePayloadLength(config, length) match
-              case Some(errPull) => errPull
-              case None          =>
-                readPayload(config, remaining, input, length).flatMap {
-                  case (payload, afterPayload, stream) =>
-                    Pull.output1(
-                      NatsFrame.MsgFrame(subject, sid, Some(replyTo), payload)
-                    ) >>
-                      parseLoop(config, afterPayload, stream)
-                }
+            validatePayloadLength(config, length.toLong) match
+              case Some(errMsg) => Step.FailSoft(errMsg)
+              case None         =>
+                readPayload(
+                  config,
+                  st,
+                  crIdx,
+                  length,
+                  (pStart, pEnd) =>
+                    Step.Emit(
+                      NatsFrame.MsgFrame(
+                        subject,
+                        sid,
+                        Some(replyTo),
+                        Chunk.array(
+                          java.util.Arrays.copyOfRange(st.carry, pStart, pEnd)
+                        )
+                      )
+                    )
+                )
           case _ =>
-            emitParseError(
-              config,
-              s"Invalid MSG frame: ${tokens.mkString(" ")}"
-            )
+            Step.FailSoft(s"Invalid MSG frame: ${tokens.mkString(" ")}")
 
       case Vector("MSG", subject, sidStr, lengthStr) =>
         (parseLong(sidStr), parseInt(lengthStr)) match
           case (Some(sid), Some(length)) =>
-            validatePayloadLength(config, length) match
-              case Some(errPull) => errPull
-              case None          =>
-                readPayload(config, remaining, input, length).flatMap {
-                  case (payload, afterPayload, stream) =>
-                    Pull.output1(
-                      NatsFrame.MsgFrame(subject, sid, None, payload)
-                    ) >>
-                      parseLoop(config, afterPayload, stream)
-                }
+            validatePayloadLength(config, length.toLong) match
+              case Some(errMsg) => Step.FailSoft(errMsg)
+              case None         =>
+                readPayload(
+                  config,
+                  st,
+                  crIdx,
+                  length,
+                  (pStart, pEnd) =>
+                    Step.Emit(
+                      NatsFrame.MsgFrame(
+                        subject,
+                        sid,
+                        None,
+                        Chunk.array(
+                          java.util.Arrays.copyOfRange(st.carry, pStart, pEnd)
+                        )
+                      )
+                    )
+                )
           case _ =>
-            emitParseError(
-              config,
-              s"Invalid MSG frame: ${tokens.mkString(" ")}"
-            )
+            Step.FailSoft(s"Invalid MSG frame: ${tokens.mkString(" ")}")
 
       case _ =>
-        emitParseError(
-          config,
-          s"Invalid MSG frame format: ${tokens.mkString(" ")}"
-        )
+        Step.FailSoft(s"Invalid MSG frame format: ${tokens.mkString(" ")}")
 
-  private def parseHMsgFrame[F[_]: Async](
+  private def handleHMsg(
       config: ParserConfig,
+      st: ParserState,
       tokens: Vector[String],
-      remaining: Chunk[Byte],
-      input: Stream[F, Byte]
-  ): Pull[F, NatsFrame, Unit] =
+      crIdx: Int
+  ): Step =
     tokens match
       case Vector(
             "HMSG",
@@ -250,153 +388,134 @@ object ProtocolParser:
         (parseLong(sidStr), parseInt(headerLenStr), parseInt(totalLenStr)) match
           case (Some(sid), Some(headerLen), Some(totalLen)) =>
             validatePayloadLength(config, totalLen.toLong) match
-              case Some(errPull) => errPull
-              case None          =>
-                readHMsgPayload(
+              case Some(errMsg) => Step.FailSoft(errMsg)
+              case None         =>
+                readPayload(
                   config,
-                  remaining,
-                  input,
-                  subject,
-                  sid,
-                  Some(replyTo),
-                  headerLen,
-                  totalLen
+                  st,
+                  crIdx,
+                  totalLen,
+                  (pStart, _) =>
+                    buildHMsg(
+                      st,
+                      subject,
+                      sid,
+                      Some(replyTo),
+                      headerLen,
+                      totalLen,
+                      pStart
+                    )
                 )
           case _ =>
-            emitParseError(
-              config,
-              s"Invalid HMSG frame: ${tokens.mkString(" ")}"
-            )
+            Step.FailSoft(s"Invalid HMSG frame: ${tokens.mkString(" ")}")
 
       case Vector("HMSG", subject, sidStr, headerLenStr, totalLenStr) =>
         (parseLong(sidStr), parseInt(headerLenStr), parseInt(totalLenStr)) match
           case (Some(sid), Some(headerLen), Some(totalLen)) =>
             validatePayloadLength(config, totalLen.toLong) match
-              case Some(errPull) => errPull
-              case None          =>
-                readHMsgPayload(
+              case Some(errMsg) => Step.FailSoft(errMsg)
+              case None         =>
+                readPayload(
                   config,
-                  remaining,
-                  input,
-                  subject,
-                  sid,
-                  None,
-                  headerLen,
-                  totalLen
+                  st,
+                  crIdx,
+                  totalLen,
+                  (pStart, _) =>
+                    buildHMsg(
+                      st,
+                      subject,
+                      sid,
+                      None,
+                      headerLen,
+                      totalLen,
+                      pStart
+                    )
                 )
           case _ =>
-            emitParseError(
-              config,
-              s"Invalid HMSG frame: ${tokens.mkString(" ")}"
-            )
+            Step.FailSoft(s"Invalid HMSG frame: ${tokens.mkString(" ")}")
 
       case _ =>
-        emitParseError(
-          config,
-          s"Invalid HMSG frame format: ${tokens.mkString(" ")}"
-        )
+        Step.FailSoft(s"Invalid HMSG frame format: ${tokens.mkString(" ")}")
 
-  private def readHMsgPayload[F[_]: Async](
-      config: ParserConfig,
-      remaining: Chunk[Byte],
-      input: Stream[F, Byte],
+  /** Build an HMSG frame by splitting the already-buffered payload region into
+    * its header and body parts (each copied into a fresh immutable Chunk). The
+    * header/body split clamps like `Chunk.take`/`Chunk.drop` so odd
+    * `headerLen`/`totalLen` combinations behave exactly as before.
+    */
+  private def buildHMsg(
+      st: ParserState,
       subject: String,
       sid: Long,
       replyTo: Option[String],
       headerLen: Int,
-      totalLen: Int
-  ): Pull[F, NatsFrame, Unit] =
-    readPayload(config, remaining, input, totalLen).flatMap {
-      case (fullPayload, afterPayload, stream) =>
-        val headerBytes = fullPayload.take(headerLen)
-        val payloadBytes = fullPayload.drop(headerLen)
-
-        Headers.parseWithStatus(headerBytes) match
-          case Right((statusCode, statusDescription, headers)) =>
-            Pull.output1(
-              NatsFrame.HMsgFrame(
-                subject,
-                sid,
-                replyTo,
-                headers,
-                statusCode,
-                statusDescription,
-                payloadBytes
-              )
-            ) >>
-              parseLoop(config, afterPayload, stream)
-          case Left(err) =>
-            emitParseError(config, s"Failed to parse HMSG headers: $err")
-    }
-
-  private def readPayload[F[_]: Async](
-      config: ParserConfig,
-      buffer: Chunk[Byte],
-      input: Stream[F, Byte],
-      length: Int
-  ): Pull[F, Nothing, (Chunk[Byte], Chunk[Byte], Stream[F, Byte])] =
-    val needed = length + 2
-
-    def accumulate(
-        buf: Chunk[Byte],
-        stream: Stream[F, Byte]
-    ): Pull[F, Nothing, (Chunk[Byte], Chunk[Byte], Stream[F, Byte])] =
-      if buf.size >= needed then
-        val payload = buf.take(length)
-        val afterPayload = buf.drop(length)
-
-        if afterPayload.size >= 2 then
-          val crlf = afterPayload.take(2)
-          if crlf(0) == CR && crlf(1) == LF then
-            Pull.pure((payload, afterPayload.drop(2), stream))
-          else if config.strictCRLF then
-            Pull.raiseError(
-              fs2.nats.errors.NatsError.ProtocolParseError(
-                s"Missing CRLF after payload (got 0x${String.format("%02x", crlf(0))} 0x${String.format("%02x", crlf(1))})"
-              )
-            )
-          else Pull.pure((payload, afterPayload.drop(2), stream))
-        else
-          stream.pull.uncons.flatMap {
-            case Some((chunk, rest)) =>
-              accumulate(buf ++ chunk, rest)
-            case None =>
-              Pull.raiseError(
-                fs2.nats.errors.NatsError.ProtocolParseError(
-                  "Unexpected end of stream while reading payload CRLF"
-                )
-              )
-          }
-      else
-        stream.pull.uncons.flatMap {
-          case Some((chunk, rest)) =>
-            accumulate(buf ++ chunk, rest)
-          case None =>
-            Pull.raiseError(
-              fs2.nats.errors.NatsError.ProtocolParseError(
-                s"Unexpected end of stream while reading payload (expected $length bytes)"
-              )
-            )
-        }
-
-    accumulate(buffer, input)
-
-  private def validatePayloadLength[F[_]: Async](
-      config: ParserConfig,
-      length: Long
-  ): Option[Pull[F, NatsFrame, Unit]] =
-    config.maxPayloadLimit match
-      case Some(max) if length > max =>
-        Some(
-          emitParseError(
-            config,
-            s"Payload size $length exceeds maximum of $max"
+      totalLen: Int,
+      pStart: Int
+  ): Step =
+    val h = math.max(0, math.min(headerLen, totalLen))
+    val headerChunk =
+      Chunk.array(java.util.Arrays.copyOfRange(st.carry, pStart, pStart + h))
+    val payloadChunk =
+      Chunk.array(
+        java.util.Arrays.copyOfRange(st.carry, pStart + h, pStart + totalLen)
+      )
+    Headers.parseWithStatus(headerChunk) match
+      case Right((statusCode, statusDescription, headers)) =>
+        Step.Emit(
+          NatsFrame.HMsgFrame(
+            subject,
+            sid,
+            replyTo,
+            headers,
+            statusCode,
+            statusDescription,
+            payloadChunk
           )
         )
-      case _ if length < 0 =>
-        Some(
-          emitParseError(config, s"Invalid negative payload length: $length")
+      case Left(err) =>
+        Step.FailSoft(s"Failed to parse HMSG headers: $err")
+
+  /** Check whether a `length`-byte payload (plus its trailing CRLF) is fully
+    * buffered after the control-line CRLF at `crIdx`. If so, verify the CRLF,
+    * advance `st.start` past the payload, and delegate frame construction to
+    * `build(payloadStart, payloadEnd)`. Otherwise signal `NeedMorePayload`.
+    */
+  private def readPayload(
+      config: ParserConfig,
+      st: ParserState,
+      crIdx: Int,
+      length: Int,
+      build: (Int, Int) => Step
+  ): Step =
+    val payloadStart = crIdx + 2
+    val needed = length.toLong + 2L
+    if (st.end - payloadStart).toLong >= needed then
+      val payloadEnd = payloadStart + length
+      val crlfA = st.carry(payloadEnd)
+      val crlfB = st.carry(payloadEnd + 1)
+      if crlfA == CR && crlfB == LF then
+        st.start = payloadEnd + 2
+        build(payloadStart, payloadEnd)
+      else if config.strictCRLF then
+        Step.FailHard(
+          s"Missing CRLF after payload (got 0x${String.format("%02x", crlfA)} 0x${String.format("%02x", crlfB)})"
         )
+      else
+        st.start = payloadEnd + 2
+        build(payloadStart, payloadEnd)
+    else Step.NeedMorePayload(length)
+
+  /** Validate a declared payload length against config limits. Returns the
+    * error message to fail with, or `None` if the length is acceptable.
+    */
+  private def validatePayloadLength(
+      config: ParserConfig,
+      length: Long
+  ): Option[String] =
+    config.maxPayloadLimit match
+      case Some(max) if length > max =>
+        Some(s"Payload size $length exceeds maximum of $max")
+      case _ if length < 0 =>
+        Some(s"Invalid negative payload length: $length")
       case _ =>
         None
 
@@ -408,48 +527,44 @@ object ProtocolParser:
       Pull.raiseError(fs2.nats.errors.NatsError.ProtocolParseError(message))
     else Pull.output1(NatsFrame.ParseErrorFrame(message)) >> Pull.done
 
-  private def findCrlf(chunk: Chunk[Byte]): Option[Int] =
-    // Scan in place over the chunk's backing array. For the common ArraySlice
-    // case toArraySlice returns the chunk itself (zero-copy), so we no longer
-    // re-materialize the whole unconsumed buffer on every control-line scan.
-    val sl = chunk.toArraySlice[Byte]
-    val values = sl.values
-    val base = sl.offset
-    val limit = base + sl.length - 1
-    var i = base
+  /** Scan `[start, end)` of `carry` for the first CRLF, returning the absolute
+    * index of the CR, or `-1` if none is present in the window.
+    */
+  private def findCrlf(carry: Array[Byte], start: Int, end: Int): Int =
+    var i = start
+    val limit = end - 1
     while i < limit do
-      if values(i) == CR && values(i + 1) == LF then return Some(i - base)
+      if carry(i) == CR && carry(i + 1) == LF then return i
       i += 1
-    None
+    -1
 
   private def isSpace(b: Byte): Boolean =
     b == ' '.toByte || b == '\t'.toByte
 
-  /** Decode the full control line as a UTF-8 String. Used only for the
-    * infrequent INFO and -ERR frames; MSG/HMSG never materialize the whole
-    * line.
+  /** Decode `[start, end)` of `carry` as a UTF-8 String. Used only for the
+    * infrequent INFO and -ERR frames.
     */
-  private def decodeLine(chunk: Chunk[Byte]): String =
-    val sl = chunk.toArraySlice[Byte]
-    new String(sl.values, sl.offset, sl.length, StandardCharsets.UTF_8)
+  private def decodeLine(carry: Array[Byte], start: Int, end: Int): String =
+    new String(carry, start, end - start, StandardCharsets.UTF_8)
 
-  /** Split a control line into whitespace-delimited tokens at the byte level,
-    * avoiding the regex split and the whole-line String allocation of the old
-    * path on the MSG/HMSG receive hot path.
+  /** Split `[start, end)` of `carry` into whitespace-delimited tokens at the
+    * byte level, avoiding a whole-line String allocation on the MSG/HMSG hot
+    * path.
     */
-  private def tokenize(chunk: Chunk[Byte]): Vector[String] =
-    val sl = chunk.toArraySlice[Byte]
-    val arr = sl.values
-    val end = sl.offset + sl.length
+  private def tokenize(
+      carry: Array[Byte],
+      start: Int,
+      end: Int
+  ): Vector[String] =
     val builder = Vector.newBuilder[String]
-    var i = sl.offset
+    var i = start
     while i < end do
-      while i < end && isSpace(arr(i)) do i += 1
+      while i < end && isSpace(carry(i)) do i += 1
       if i < end then
         val tokenStart = i
-        while i < end && !isSpace(arr(i)) do i += 1
+        while i < end && !isSpace(carry(i)) do i += 1
         builder += new String(
-          arr,
+          carry,
           tokenStart,
           i - tokenStart,
           StandardCharsets.UTF_8
