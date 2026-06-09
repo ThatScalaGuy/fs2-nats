@@ -83,7 +83,7 @@ object TlsTransport:
   ): Resource[F, Transport[F]] =
     for
       writeQueue <- Resource.eval(
-        Queue.bounded[F, Option[Chunk[Byte]]](config.writeQueueCapacity)
+        Queue.bounded[F, Chunk[Byte]](config.writeQueueCapacity)
       )
       connectedRef <- Resource.eval(Ref.of[F, Boolean](true))
       _ <- Transport.startWriter(socket, writeQueue, connectedRef, config)
@@ -96,7 +96,7 @@ object TlsTransport:
 
   private class TlsSocketTransport[F[_]: Async](
       socket: TLSSocket[F],
-      writeQueue: Queue[F, Option[Chunk[Byte]]],
+      writeQueue: Queue[F, Chunk[Byte]],
       connectedRef: Ref[F, Boolean],
       parserConfig: ParserConfig
   ) extends Transport[F]:
@@ -107,13 +107,13 @@ object TlsTransport:
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
       connectedRef.get.flatMap { connected =>
-        if connected then writeQueue.offer(Some(bytes))
+        if connected then writeQueue.offer(bytes)
         else Async[F].raiseError(fs2.nats.errors.NatsError.ClientClosed)
       }
 
     override def close: F[Unit] =
       connectedRef.set(false) *>
-        writeQueue.offer(None) *>
+        writeQueue.offer(Transport.WriterPoison) *>
         socket.endOfOutput
 
     override def isConnected: F[Boolean] =

@@ -70,6 +70,13 @@ trait Transport[F[_]]:
 
 object Transport:
 
+  /** Sentinel enqueued to terminate a transport's writer drain loop. Compared
+    * by reference identity (`ne`), so real frames need not be boxed in an
+    * `Option` just to carry an out-of-band end-of-stream signal — a queued
+    * frame is always a distinct `Chunk` instance, so `eq` never collides.
+    */
+  private[transport] val WriterPoison: Chunk[Byte] = Chunk.singleton(0.toByte)
+
   /** Initial capacity of a writer's reusable coalescing buffer. Sized so a
     * typical drain never has to grow it; a single oversized message grows it
     * once and the larger buffer is retained for the connection's lifetime.
@@ -109,20 +116,20 @@ object Transport:
 
   /** Start the single writer fiber for a transport.
     *
-    * Drains the write queue in batches (`fromQueueNoneTerminated` blocks for
-    * the first element then sweeps up everything immediately available),
-    * coalesces each batch into the reusable [[WriteBuffer]], and flushes it in
-    * one `socket.write`. Each write is bounded by `writeTimeout` so a stalled
+    * Drains the write queue in batches (`fromQueueUnterminated` blocks for the
+    * first element then sweeps up everything immediately available), coalesces
+    * each batch into the reusable [[WriteBuffer]], and flushes it in one
+    * `socket.write`. Each write is bounded by `writeTimeout` so a stalled
     * socket (dead peer, full send buffer) fails the writer and triggers
     * reconnect instead of hanging; the timeout is per drain, i.e. amortized
     * over the whole coalesced batch, not per message. On any error the
     * transport is marked disconnected and the error re-raised. The returned
-    * Resource supervises the fiber and, on release, pushes the `None` poison
-    * pill to terminate it.
+    * Resource supervises the fiber and, on release, pushes the [[WriterPoison]]
+    * sentinel to terminate it.
     */
   private[transport] def startWriter[F[_]: Async](
       socket: Socket[F],
-      writeQueue: Queue[F, Option[Chunk[Byte]]],
+      writeQueue: Queue[F, Chunk[Byte]],
       connectedRef: Ref[F, Boolean],
       config: TransportConfig
   ): Resource[F, Unit] =
@@ -131,7 +138,8 @@ object Transport:
         .delay(new WriteBuffer)
         .flatMap { wb =>
           Stream
-            .fromQueueNoneTerminated(writeQueue)
+            .fromQueueUnterminated(writeQueue)
+            .takeWhile(_ ne WriterPoison)
             .chunks
             .foreach { batch =>
               Async[F]
@@ -157,6 +165,6 @@ object Transport:
 
     Resource
       .make(Async[F].start(writerFiber))(_ =>
-        writeQueue.offer(None) *> Async[F].unit
+        writeQueue.offer(WriterPoison) *> Async[F].unit
       )
       .void
