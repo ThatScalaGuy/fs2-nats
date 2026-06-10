@@ -21,7 +21,7 @@ import cats.effect.std.Queue
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.io.net.Socket
-import fs2.nats.protocol.NatsFrame
+import fs2.nats.protocol.Frame
 
 /** Transport abstraction for NATS socket communication.
   *
@@ -34,14 +34,16 @@ import fs2.nats.protocol.NatsFrame
   */
 trait Transport[F[_]]:
 
-  /** Stream of parsed NATS frames from the server. This stream never drops
-    * frames silently - errors are surfaced as ParseErrorFrame or as stream
-    * failures depending on parser config.
+  /** Stream of parsed protocol elements from the server. Control frames are
+    * `NatsFrame`s; MSG/HMSG data frames are built by the injected message
+    * builder (the client builds `NatsMessage` directly). This stream never
+    * drops frames silently - errors are surfaced as ParseErrorFrame or as
+    * stream failures depending on parser config.
     *
     * @return
-    *   A continuous stream of NatsFrame values
+    *   A continuous stream of [[Frame]] values
     */
-  def frames: Stream[F, NatsFrame]
+  def frames: Stream[F, Frame]
 
   /** Send raw bytes to the server. Writes are enqueued and processed in order
     * by a single writer fiber, ensuring atomic and ordered transmission.

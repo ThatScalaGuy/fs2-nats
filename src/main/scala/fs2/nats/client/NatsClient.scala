@@ -24,7 +24,7 @@ import fs2.io.net.Network
 import fs2.io.net.tls.TLSContext
 import fs2.nats.errors.NatsError
 import fs2.nats.jetstream.{JetStream, JetStreamConfig}
-import fs2.nats.protocol.{Headers, Info, NatsFrame, ParserConfig}
+import fs2.nats.protocol.{Frame, Headers, Info, NatsFrame, ParserConfig}
 import fs2.nats.publish.{Publisher, SerializationUtils}
 import fs2.nats.subscriptions.{NatsMessage, SidAllocator, SubscriptionManager}
 import fs2.nats.transport.TransportConfig
@@ -183,6 +183,7 @@ object NatsClient:
     for
       connManager <- ConnectionManager.connect(
         config,
+        NatsMessage.parserBuilder,
         transportConfig,
         parserConfig,
         tlsContext
@@ -245,7 +246,7 @@ object NatsClient:
   private class TransportAdapter[F[_]: Async](
       connManager: ConnectionManager[F]
   ) extends fs2.nats.transport.Transport[F]:
-    override def frames: Stream[F, NatsFrame] = connManager.frames
+    override def frames: Stream[F, Frame] = connManager.frames
     override def send(bytes: Chunk[Byte]): F[Unit] = connManager.send(bytes)
     override def sendOutgoing(
         out: fs2.nats.transport.Outgoing
@@ -308,8 +309,17 @@ object NatsClient:
         else connManager.reconnect(reason) *> frameProcessor
       }
 
-    private def handleFrame(frame: NatsFrame): F[Unit] =
+    private def handleFrame(frame: Frame): F[Unit] =
       frame match
+        case nm: NatsMessage =>
+          // The parser (via NatsMessage.parserBuilder) builds the user message
+          // directly on the MSG/HMSG data path, so it arrives here already
+          // constructed — there is no separate MsgFrame to re-wrap.
+          subManager.routeMessage(nm).flatMap {
+            case Some(slowConsumer) => eventQueue.offer(slowConsumer)
+            case None               => Async[F].unit
+          }
+
         case NatsFrame.PingFrame =>
           connManager.send(SerializationUtils.buildPong)
 
@@ -330,15 +340,13 @@ object NatsClient:
             (if info.ldmMode then eventQueue.offer(ClientEvent.LameDuckMode)
              else Async[F].unit)
 
-        case msg @ (NatsFrame.MsgFrame(_, _, _, _) |
-            NatsFrame.HMsgFrame(_, _, _, _, _, _, _)) =>
-          subManager.routeMessage(msg).flatMap {
-            case Some(slowConsumer) => eventQueue.offer(slowConsumer)
-            case None               => Async[F].unit
-          }
-
         case NatsFrame.ParseErrorFrame(msg, _) =>
           eventQueue.offer(ClientEvent.ProtocolError(msg, fatal = false))
+
+        case _ =>
+          // MsgFrame/HMsgFrame are never produced on this path (the parser
+          // builds NatsMessage directly); ignore any other Frame.
+          Async[F].unit
 
     private def isAuthError(msg: String): Boolean =
       val lower = msg.toLowerCase

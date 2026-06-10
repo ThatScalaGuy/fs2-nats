@@ -17,7 +17,7 @@
 package fs2.nats.subscriptions
 
 import fs2.Chunk
-import fs2.nats.protocol.Headers
+import fs2.nats.protocol.{Frame, Headers, MsgBuilder}
 
 /** Represents a message received from a NATS subscription. This is the
   * user-facing message type delivered through subscription streams.
@@ -47,7 +47,7 @@ final case class NatsMessage(
     sid: Long,
     status: Option[Int] = None,
     statusDescription: Option[String] = None
-):
+) extends Frame:
 
   /** Get the payload as a UTF-8 string.
     *
@@ -119,3 +119,36 @@ object NatsMessage:
         Chunk.array(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)),
       sid = sid
     )
+
+  /** Parser [[MsgBuilder]] that constructs the user-facing `NatsMessage`
+    * directly from a MSG/HMSG frame. Injected into the protocol parser so the
+    * receive path allocates one object per message (this `NatsMessage`) instead
+    * of a `MsgFrame` that a later routing stage re-wraps into a `NatsMessage`.
+    */
+  val parserBuilder: MsgBuilder[NatsMessage] = new MsgBuilder[NatsMessage]:
+    def msg(
+        subject: String,
+        sid: Long,
+        replyTo: Option[String],
+        payload: Chunk[Byte]
+    ): NatsMessage =
+      NatsMessage(subject, replyTo, Headers.empty, payload, sid)
+
+    def hmsg(
+        subject: String,
+        sid: Long,
+        replyTo: Option[String],
+        headers: Headers,
+        statusCode: Option[Int],
+        statusDescription: Option[String],
+        payload: Chunk[Byte]
+    ): NatsMessage =
+      NatsMessage(
+        subject,
+        replyTo,
+        headers,
+        payload,
+        sid,
+        statusCode,
+        statusDescription
+      )

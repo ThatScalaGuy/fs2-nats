@@ -84,26 +84,29 @@ object ProtocolParser:
     var start: Int = 0
     var end: Int = 0
 
-  /** Outcome of attempting to parse one frame from the current carry window. */
-  private sealed trait Step
+  /** Outcome of attempting to parse one frame from the current carry window.
+    * `A` is the emitted element type (control frames are `NatsFrame`; data
+    * frames are whatever the injected [[MsgBuilder]] builds).
+    */
+  private sealed trait Step[+A]
   private object Step:
     /** A complete frame was parsed; `start` has already been advanced past it.
       */
-    final case class Emit(frame: NatsFrame) extends Step
+    final case class Emit[+A](frame: A) extends Step[A]
 
     /** Not enough bytes for a control line yet — pull more input. */
-    case object NeedMoreControl extends Step
+    case object NeedMoreControl extends Step[Nothing]
 
     /** Control line parsed; waiting for a `length`-byte payload (+ CRLF). */
-    final case class NeedMorePayload(length: Int) extends Step
+    final case class NeedMorePayload(length: Int) extends Step[Nothing]
 
     /** Recoverable protocol error: raise in strict mode, else emit a
       * `ParseErrorFrame` and end the stream.
       */
-    final case class FailSoft(message: String) extends Step
+    final case class FailSoft(message: String) extends Step[Nothing]
 
     /** Hard protocol error: always raise, regardless of strict mode. */
-    final case class FailHard(message: String) extends Step
+    final case class FailHard(message: String) extends Step[Nothing]
 
   /** Create a parsing pipe that transforms bytes into NATS frames.
     *
@@ -125,29 +128,55 @@ object ProtocolParser:
     *   A Pipe that parses bytes into NatsFrame values
     */
   def parseStream[F[_]: Async](config: ParserConfig): Pipe[F, Byte, NatsFrame] =
+    parseStreamWith(MsgBuilder.natsFrame, config)
+
+  /** Create a parsing pipe that builds MSG/HMSG *data* frames with `builder`.
+    *
+    * Control frames (INFO/PING/PONG/+OK/-ERR) are always emitted as
+    * `NatsFrame`; data frames are whatever `builder` constructs (`O`). With
+    * [[MsgBuilder.natsFrame]] this is exactly [[parseStream]]; the client
+    * injects a builder that constructs `subscriptions.NatsMessage` directly so
+    * the receive path materializes a single object per message instead of a
+    * `MsgFrame` that a later routing stage re-wraps.
+    *
+    * @param builder
+    *   How to build the emitted object for a MSG/HMSG data frame
+    * @param config
+    *   Parser configuration
+    * @tparam O
+    *   The emitted element type: a supertype of `NatsFrame` (so control frames
+    *   fit) and a subtype of [[Frame]]
+    * @return
+    *   A Pipe that parses bytes into `O` values
+    */
+  def parseStreamWith[F[_]: Async, O >: NatsFrame <: Frame](
+      builder: MsgBuilder[O],
+      config: ParserConfig = ParserConfig.default
+  ): Pipe[F, Byte, O] =
     input =>
       Stream.suspend {
         // Fresh carry per materialization, born inside the stream and owned by
         // the single fiber that pulls it.
         val state = new ParserState(InitialCapacity)
-        go(config, state, input).stream
+        go(config, state, input, builder).stream
       }
 
   /** Drive parsing: emit as many complete frames as the current carry allows,
     * pulling more input whenever a frame can't yet be completed.
     */
-  private def go[F[_]: Async](
+  private def go[F[_]: Async, O >: NatsFrame <: Frame](
       config: ParserConfig,
       st: ParserState,
-      input: Stream[F, Byte]
-  ): Pull[F, NatsFrame, Unit] =
-    parseOne(config, st) match
+      input: Stream[F, Byte],
+      builder: MsgBuilder[O]
+  ): Pull[F, O, Unit] =
+    parseOne(config, st, builder) match
       case Step.Emit(frame) =>
-        Pull.output1(frame) >> go(config, st, input)
+        Pull.output1(frame) >> go(config, st, input, builder)
       case Step.NeedMoreControl =>
-        needMore(config, st, input, -1)
+        needMore(config, st, input, -1, builder)
       case Step.NeedMorePayload(length) =>
-        needMore(config, st, input, length)
+        needMore(config, st, input, length, builder)
       case Step.FailSoft(message) =>
         emitParseError(config, message)
       case Step.FailHard(message) =>
@@ -159,12 +188,13 @@ object ProtocolParser:
     *   `>= 0` if we were waiting on a payload of that length (so EOF is a
     *   payload-truncation error), `-1` if we were waiting on a control line.
     */
-  private def needMore[F[_]: Async](
+  private def needMore[F[_]: Async, O >: NatsFrame <: Frame](
       config: ParserConfig,
       st: ParserState,
       input: Stream[F, Byte],
-      payloadLen: Int
-  ): Pull[F, NatsFrame, Unit] =
+      payloadLen: Int,
+      builder: MsgBuilder[O]
+  ): Pull[F, O, Unit] =
     input.pull.uncons.flatMap {
       case Some((chunk, rest)) =>
         val live = st.end - st.start
@@ -176,7 +206,7 @@ object ProtocolParser:
           )
         else
           appendChunk(st, chunk)
-          go(config, st, rest)
+          go(config, st, rest, builder)
 
       case None =>
         if payloadLen >= 0 then
@@ -242,8 +272,12 @@ object ProtocolParser:
   /** Attempt to parse exactly one frame from `[start, end)`. Advances
     * `st.start` past whatever it consumes (including skipped blank lines).
     */
-  private def parseOne(config: ParserConfig, st: ParserState): Step =
-    var result: Step = null
+  private def parseOne[O >: NatsFrame <: Frame](
+      config: ParserConfig,
+      st: ParserState,
+      builder: MsgBuilder[O]
+  ): Step[O] =
+    var result: Step[O] = null
     while result == null do
       val start = st.start
       val crIdx = findCrlf(st.carry, start, st.end)
@@ -278,10 +312,10 @@ object ProtocolParser:
                   )
 
             case Some("MSG") =>
-              result = handleMsg(config, st, tokens, crIdx)
+              result = handleMsg(config, st, tokens, crIdx, builder)
 
             case Some("HMSG") =>
-              result = handleHMsg(config, st, tokens, crIdx)
+              result = handleHMsg(config, st, tokens, crIdx, builder)
 
             case Some("PING") =>
               st.start = crIdx + 2
@@ -308,12 +342,13 @@ object ProtocolParser:
               result = Step.FailSoft(s"Unrecognized command: $cmd")
     result
 
-  private def handleMsg(
+  private def handleMsg[O >: NatsFrame <: Frame](
       config: ParserConfig,
       st: ParserState,
       tokens: Vector[String],
-      crIdx: Int
-  ): Step =
+      crIdx: Int,
+      builder: MsgBuilder[O]
+  ): Step[O] =
     tokens match
       case Vector("MSG", subject, sidStr, replyTo, lengthStr) =>
         (parseLong(sidStr), parseInt(lengthStr)) match
@@ -328,7 +363,7 @@ object ProtocolParser:
                   length,
                   (pStart, pEnd) =>
                     Step.Emit(
-                      NatsFrame.MsgFrame(
+                      builder.msg(
                         subject,
                         sid,
                         Some(replyTo),
@@ -354,7 +389,7 @@ object ProtocolParser:
                   length,
                   (pStart, pEnd) =>
                     Step.Emit(
-                      NatsFrame.MsgFrame(
+                      builder.msg(
                         subject,
                         sid,
                         None,
@@ -370,12 +405,13 @@ object ProtocolParser:
       case _ =>
         Step.FailSoft(s"Invalid MSG frame format: ${tokens.mkString(" ")}")
 
-  private def handleHMsg(
+  private def handleHMsg[O >: NatsFrame <: Frame](
       config: ParserConfig,
       st: ParserState,
       tokens: Vector[String],
-      crIdx: Int
-  ): Step =
+      crIdx: Int,
+      builder: MsgBuilder[O]
+  ): Step[O] =
     tokens match
       case Vector(
             "HMSG",
@@ -403,7 +439,8 @@ object ProtocolParser:
                       Some(replyTo),
                       headerLen,
                       totalLen,
-                      pStart
+                      pStart,
+                      builder
                     )
                 )
           case _ =>
@@ -428,7 +465,8 @@ object ProtocolParser:
                       None,
                       headerLen,
                       totalLen,
-                      pStart
+                      pStart,
+                      builder
                     )
                 )
           case _ =>
@@ -442,15 +480,16 @@ object ProtocolParser:
     * header/body split clamps like `Chunk.take`/`Chunk.drop` so odd
     * `headerLen`/`totalLen` combinations behave exactly as before.
     */
-  private def buildHMsg(
+  private def buildHMsg[O >: NatsFrame <: Frame](
       st: ParserState,
       subject: String,
       sid: Long,
       replyTo: Option[String],
       headerLen: Int,
       totalLen: Int,
-      pStart: Int
-  ): Step =
+      pStart: Int,
+      builder: MsgBuilder[O]
+  ): Step[O] =
     val h = math.max(0, math.min(headerLen, totalLen))
     val headerChunk =
       Chunk.array(java.util.Arrays.copyOfRange(st.carry, pStart, pStart + h))
@@ -461,7 +500,7 @@ object ProtocolParser:
     Headers.parseWithStatus(headerChunk) match
       case Right((statusCode, statusDescription, headers)) =>
         Step.Emit(
-          NatsFrame.HMsgFrame(
+          builder.hmsg(
             subject,
             sid,
             replyTo,
@@ -479,13 +518,13 @@ object ProtocolParser:
     * advance `st.start` past the payload, and delegate frame construction to
     * `build(payloadStart, payloadEnd)`. Otherwise signal `NeedMorePayload`.
     */
-  private def readPayload(
+  private def readPayload[O >: NatsFrame <: Frame](
       config: ParserConfig,
       st: ParserState,
       crIdx: Int,
       length: Int,
-      build: (Int, Int) => Step
-  ): Step =
+      build: (Int, Int) => Step[O]
+  ): Step[O] =
     val payloadStart = crIdx + 2
     val needed = length.toLong + 2L
     if (st.end - payloadStart).toLong >= needed then
@@ -519,10 +558,10 @@ object ProtocolParser:
       case _ =>
         None
 
-  private def emitParseError[F[_]: Async](
+  private def emitParseError[F[_]: Async, O >: NatsFrame <: Frame](
       config: ParserConfig,
       message: String
-  ): Pull[F, NatsFrame, Unit] =
+  ): Pull[F, O, Unit] =
     if config.strictMode then
       Pull.raiseError(fs2.nats.errors.NatsError.ProtocolParseError(message))
     else Pull.output1(NatsFrame.ParseErrorFrame(message)) >> Pull.done
