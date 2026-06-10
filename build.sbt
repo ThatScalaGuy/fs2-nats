@@ -12,7 +12,7 @@ lazy val V = new {
   val munitScalaCheck = "1.3.0"
 }
 
-ThisBuild / tlBaseVersion := "0.2"
+ThisBuild / tlBaseVersion := "0.3"
 ThisBuild / organization := "de.thatscalaguy"
 ThisBuild / organizationName := "ThatScalaGuy"
 ThisBuild / startYear := Some(2025)
