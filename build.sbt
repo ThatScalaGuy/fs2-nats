@@ -71,6 +71,80 @@ lazy val root = project
       ProblemFilters.exclude[ReversedMissingMethodProblem](
         "fs2.nats.client.ConnectionManager.sendOutgoing"
       ),
+      // P1.3: the receive path builds the user-facing NatsMessage once. The
+      // protocol parser became generic over an injected MsgBuilder, so the
+      // transports/ConnectionManager thread it through (added constructor/factory
+      // params) and `routeMessage` now takes a prebuilt NatsMessage. All of these
+      // are internal SPIs, not the frozen public NatsClient API.
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.client.ConnectionManager.connect"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.client.ConnectionManager.connect$default$2"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.client.ConnectionManager#ConnectionManagerImpl.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.NatsSocket.fromSocket"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.NatsSocket.fromSocket$default$2"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.NatsSocket.resource"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.NatsSocket.resource$default$2"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.NatsSocket#SocketTransport.this"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TlsTransport.fromTlsSocket"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TlsTransport.fromTlsSocket$default$2"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TlsTransport.wrap"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TlsTransport.wrap$default$3"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TlsTransport#TlsSocketTransport.this"
+      ),
+      ProblemFilters.exclude[IncompatibleMethTypeProblem](
+        "fs2.nats.subscriptions.SubscriptionManager.routeMessage"
+      ),
+      ProblemFilters.exclude[IncompatibleMethTypeProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#SubscriptionManagerImpl.routeMessage"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.client.ConnectionManager.connect$default$3"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.client.ConnectionManager.connect$default$4"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.transport.NatsSocket.fromSocket$default$3"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.transport.NatsSocket.resource$default$3"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.transport.TlsTransport.fromTlsSocket$default$3"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.transport.TlsTransport.wrap$default$4"
+      ),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.nats.transport.TlsTransport.wrap$default$5"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager.routeMessage"
+      ),
       ProblemFilters.exclude[IncompatibleMethTypeProblem](
         "fs2.nats.publish.Publisher#PublisherImpl.this"
       ),

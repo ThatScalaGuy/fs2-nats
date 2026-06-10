@@ -23,7 +23,7 @@ import com.comcast.ip4s.{Host, SocketAddress}
 import fs2.{Chunk, Stream}
 import fs2.io.net.{Network, Socket}
 import fs2.nats.protocol.ParserConfig
-import fs2.nats.protocol.NatsFrame
+import fs2.nats.protocol.{Frame, MsgBuilder}
 import fs2.nats.protocol.ProtocolParser
 
 /** NATS socket transport implementation.
@@ -54,12 +54,13 @@ object NatsSocket:
     */
   def resource[F[_]: Async: Network](
       address: SocketAddress[Host],
+      msgBuilder: MsgBuilder[Frame],
       config: TransportConfig = TransportConfig.default,
       parserConfig: ParserConfig = ParserConfig.default
   ): Resource[F, Transport[F]] =
     for
       socket <- Network[F].connect(address)
-      transport <- fromSocket(socket, config, parserConfig)
+      transport <- fromSocket(socket, msgBuilder, config, parserConfig)
     yield transport
 
   /** Create a Transport from an existing socket.
@@ -77,6 +78,7 @@ object NatsSocket:
     */
   def fromSocket[F[_]: Async](
       socket: Socket[F],
+      msgBuilder: MsgBuilder[Frame],
       config: TransportConfig = TransportConfig.default,
       parserConfig: ParserConfig = ParserConfig.default
   ): Resource[F, Transport[F]] =
@@ -90,6 +92,7 @@ object NatsSocket:
       socket,
       writeQueue,
       connectedRef,
+      msgBuilder,
       parserConfig
     )
 
@@ -97,12 +100,13 @@ object NatsSocket:
       socket: Socket[F],
       writeQueue: Queue[F, Outgoing],
       connectedRef: Ref[F, Boolean],
+      msgBuilder: MsgBuilder[Frame],
       parserConfig: ParserConfig
   ) extends Transport[F]:
 
-    override def frames: Stream[F, NatsFrame] =
+    override def frames: Stream[F, Frame] =
       socket.reads
-        .through(ProtocolParser.parseStream(parserConfig))
+        .through(ProtocolParser.parseStreamWith(msgBuilder, parserConfig))
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
       sendOutgoing(Outgoing.Raw(bytes))

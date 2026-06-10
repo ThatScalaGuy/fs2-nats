@@ -21,7 +21,7 @@ import cats.effect.std.Queue
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.nats.client.{ClientEvent, SlowConsumerPolicy}
-import fs2.nats.protocol.{Headers, NatsFrame}
+import fs2.nats.protocol.Headers
 
 /** Handle for managing a subscription. Provides methods to unsubscribe and
   * configure message delivery.
@@ -102,14 +102,15 @@ trait SubscriptionManager[F[_]]:
       queueGroup: Option[String] = None
   ): F[(Stream[F, NatsMessage], SubscriptionHandle[F])]
 
-  /** Route an incoming message frame to the appropriate subscription.
+  /** Route an already-built message (constructed by the parser on the data
+    * path) to the appropriate subscription.
     *
-    * @param frame
-    *   The MSG or HMSG frame
+    * @param msg
+    *   The message to deliver
     * @return
     *   Effect that completes when the message is routed or policy applied
     */
-  def routeMessage(frame: NatsFrame): F[Option[ClientEvent.SlowConsumer]]
+  def routeMessage(msg: NatsMessage): F[Option[ClientEvent.SlowConsumer]]
 
   /** Get all active subscriptions for reconnection.
     *
@@ -225,35 +226,9 @@ object SubscriptionManager:
         (stream, handle)
 
     override def routeMessage(
-        frame: NatsFrame
+        msg: NatsMessage
     ): F[Option[ClientEvent.SlowConsumer]] =
-      frame match
-        case NatsFrame.MsgFrame(subject, sid, replyTo, payload) =>
-          val msg = NatsMessage(subject, replyTo, Headers.empty, payload, sid)
-          deliverMessage(sid, msg)
-
-        case NatsFrame.HMsgFrame(
-              subject,
-              sid,
-              replyTo,
-              headers,
-              statusCode,
-              statusDescription,
-              payload
-            ) =>
-          val msg = NatsMessage(
-            subject,
-            replyTo,
-            headers,
-            payload,
-            sid,
-            statusCode,
-            statusDescription
-          )
-          deliverMessage(sid, msg)
-
-        case _ =>
-          Async[F].pure(None)
+      deliverMessage(msg.sid, msg)
 
     private def deliverMessage(
         sid: Long,

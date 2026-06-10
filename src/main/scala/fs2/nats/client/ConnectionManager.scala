@@ -28,7 +28,9 @@ import fs2.nats.auth.NKey
 import fs2.nats.errors.NatsError
 import fs2.nats.protocol.{
   Connect,
+  Frame,
   Info,
+  MsgBuilder,
   NatsFrame,
   ParserConfig,
   ProtocolParser
@@ -108,9 +110,10 @@ trait ConnectionManager[F[_]]:
     */
   def sendOutgoing(out: Outgoing): F[Unit]
 
-  /** Stream of incoming NATS frames from the server.
+  /** Stream of incoming protocol elements from the server (control `NatsFrame`s
+    * and already-built `NatsMessage` data frames; see [[Frame]]).
     */
-  def frames: Stream[F, NatsFrame]
+  def frames: Stream[F, Frame]
 
   /** Stream of connection events.
     */
@@ -157,6 +160,7 @@ object ConnectionManager:
     */
   def connect[F[_]: Async: Network](
       config: ClientConfig,
+      msgBuilder: MsgBuilder[Frame],
       transportConfig: TransportConfig = TransportConfig.default,
       parserConfig: ParserConfig = ParserConfig.default,
       tlsContext: Option[TLSContext[F]] = None
@@ -185,6 +189,7 @@ object ConnectionManager:
 
       manager = new ConnectionManagerImpl[F](
         config,
+        msgBuilder,
         transportConfig,
         parserConfig,
         tlsContext,
@@ -203,6 +208,7 @@ object ConnectionManager:
 
   private class ConnectionManagerImpl[F[_]: Async: Network](
       config: ClientConfig,
+      msgBuilder: MsgBuilder[Frame],
       transportConfig: TransportConfig,
       parserConfig: ParserConfig,
       tlsContext: Option[TLSContext[F]],
@@ -356,7 +362,7 @@ object ConnectionManager:
           case Left(err)      => Async[F].raiseError(err)
         }
 
-    override def frames: Stream[F, NatsFrame] =
+    override def frames: Stream[F, Frame] =
       Stream.eval(transport).flatMap(_.frames)
 
     override def events: Stream[F, ClientEvent] =
@@ -490,6 +496,7 @@ object ConnectionManager:
                 transport <- TlsTransport.wrap(
                   ctx,
                   socket,
+                  msgBuilder,
                   params,
                   transportConfig,
                   parserConfig
@@ -511,7 +518,7 @@ object ConnectionManager:
         Async[F].uncancelable { poll =>
           poll(
             NatsSocket
-              .resource(address, transportConfig, parserConfig)
+              .resource(address, msgBuilder, transportConfig, parserConfig)
               .allocated
           ).flatMap { case (transport, release) =>
             poll(waitForInfoAndConnect(transport, server.useTls))

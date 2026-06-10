@@ -21,7 +21,7 @@ import cats.effect.kernel.Ref
 import fs2.Chunk
 import munit.CatsEffectSuite
 import fs2.nats.client.SlowConsumerPolicy
-import fs2.nats.protocol.{Headers, NatsFrame}
+import fs2.nats.protocol.Headers
 
 class SubscriptionManagerSpec extends CatsEffectSuite:
 
@@ -46,13 +46,13 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
         val (stream, _) = result
         manager
           .routeMessage(
-            NatsFrame
-              .MsgFrame("test.subject", 1, None, Chunk.array("Hello".getBytes))
+            NatsMessage.parserBuilder
+              .msg("test.subject", 1, None, Chunk.array("Hello".getBytes))
           )
           .flatMap { _ =>
             manager
               .routeMessage(
-                NatsFrame.MsgFrame(
+                NatsMessage.parserBuilder.msg(
                   "test.subject",
                   1,
                   None,
@@ -134,7 +134,7 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
         val headers = Headers("X-Custom" -> "value")
         manager
           .routeMessage(
-            NatsFrame.HMsgFrame(
+            NatsMessage.parserBuilder.hmsg(
               "test",
               1,
               Some("reply"),
@@ -162,7 +162,7 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
         val (stream, _) = result
         manager
           .routeMessage(
-            NatsFrame.HMsgFrame(
+            NatsMessage.parserBuilder.hmsg(
               "test",
               1,
               None,
@@ -187,7 +187,8 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
     createManager().flatMap { case (manager, _) =>
       manager
         .routeMessage(
-          NatsFrame.MsgFrame("test", 999, None, Chunk.array("orphan".getBytes))
+          NatsMessage.parserBuilder
+            .msg("test", 999, None, Chunk.array("orphan".getBytes))
         )
         .map { result =>
           assertEquals(result, None)
@@ -218,12 +219,14 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
           val (stream, _) = result
           manager
             .routeMessage(
-              NatsFrame.MsgFrame("test", 1, None, Chunk.array("1".getBytes))
+              NatsMessage.parserBuilder
+                .msg("test", 1, None, Chunk.array("1".getBytes))
             )
             .flatMap { _ =>
               manager
                 .routeMessage(
-                  NatsFrame.MsgFrame("test", 1, None, Chunk.array("2".getBytes))
+                  NatsMessage.parserBuilder
+                    .msg("test", 1, None, Chunk.array("2".getBytes))
                 )
                 .flatMap { _ =>
                   stream.take(2).compile.toList.map { messages =>
@@ -242,13 +245,14 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
           val (stream, _) = result
           manager
             .routeMessage(
-              NatsFrame.MsgFrame("test", 1, None, Chunk.array("1".getBytes))
+              NatsMessage.parserBuilder
+                .msg("test", 1, None, Chunk.array("1".getBytes))
             )
             .flatMap { _ =>
               manager
                 .routeMessage(
-                  NatsFrame
-                    .MsgFrame("test", 1, None, Chunk.array("dropped".getBytes))
+                  NatsMessage.parserBuilder
+                    .msg("test", 1, None, Chunk.array("dropped".getBytes))
                 )
                 .flatMap { slowConsumer =>
                   stream.take(1).compile.toList.map { messages =>
@@ -269,13 +273,14 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
           val (stream, _) = result
           manager
             .routeMessage(
-              NatsFrame.MsgFrame("test", 1, None, Chunk.array("old".getBytes))
+              NatsMessage.parserBuilder
+                .msg("test", 1, None, Chunk.array("old".getBytes))
             )
             .flatMap { _ =>
               manager
                 .routeMessage(
-                  NatsFrame
-                    .MsgFrame("test", 1, None, Chunk.array("new".getBytes))
+                  NatsMessage.parserBuilder
+                    .msg("test", 1, None, Chunk.array("new".getBytes))
                 )
                 .flatMap { slowConsumer =>
                   stream.take(1).compile.toList.map { messages =>
@@ -294,12 +299,14 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
         manager.register(1, "test", None).flatMap { _ =>
           manager
             .routeMessage(
-              NatsFrame.MsgFrame("test", 1, None, Chunk.array("1".getBytes))
+              NatsMessage.parserBuilder
+                .msg("test", 1, None, Chunk.array("1".getBytes))
             )
             .flatMap { _ =>
               manager
                 .routeMessage(
-                  NatsFrame.MsgFrame("test", 1, None, Chunk.array("2".getBytes))
+                  NatsMessage.parserBuilder
+                    .msg("test", 1, None, Chunk.array("2".getBytes))
                 )
                 .map { slowConsumer =>
                   assert(slowConsumer.isDefined)

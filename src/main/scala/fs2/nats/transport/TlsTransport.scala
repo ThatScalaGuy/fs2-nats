@@ -22,7 +22,7 @@ import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.io.net.Socket
 import fs2.io.net.tls.{TLSContext, TLSParameters, TLSSocket}
-import fs2.nats.protocol.{NatsFrame, ParserConfig, ProtocolParser}
+import fs2.nats.protocol.{Frame, MsgBuilder, ParserConfig, ProtocolParser}
 
 /** TLS-wrapped NATS transport.
   *
@@ -51,6 +51,7 @@ object TlsTransport:
   def wrap[F[_]: Async](
       tlsContext: TLSContext[F],
       underlying: Socket[F],
+      msgBuilder: MsgBuilder[Frame],
       params: TLSParameters = TLSParameters.Default,
       config: TransportConfig = TransportConfig.default,
       parserConfig: ParserConfig = ParserConfig.default
@@ -60,7 +61,7 @@ object TlsTransport:
         .clientBuilder(underlying)
         .withParameters(params)
         .build
-      transport <- fromTlsSocket(tlsSocket, config, parserConfig)
+      transport <- fromTlsSocket(tlsSocket, msgBuilder, config, parserConfig)
     yield transport
 
   /** Create a Transport from an existing TLS socket.
@@ -78,6 +79,7 @@ object TlsTransport:
     */
   def fromTlsSocket[F[_]: Async](
       socket: TLSSocket[F],
+      msgBuilder: MsgBuilder[Frame],
       config: TransportConfig = TransportConfig.default,
       parserConfig: ParserConfig = ParserConfig.default
   ): Resource[F, Transport[F]] =
@@ -91,6 +93,7 @@ object TlsTransport:
       socket,
       writeQueue,
       connectedRef,
+      msgBuilder,
       parserConfig
     )
 
@@ -98,12 +101,13 @@ object TlsTransport:
       socket: TLSSocket[F],
       writeQueue: Queue[F, Outgoing],
       connectedRef: Ref[F, Boolean],
+      msgBuilder: MsgBuilder[Frame],
       parserConfig: ParserConfig
   ) extends Transport[F]:
 
-    override def frames: Stream[F, NatsFrame] =
+    override def frames: Stream[F, Frame] =
       socket.reads
-        .through(ProtocolParser.parseStream(parserConfig))
+        .through(ProtocolParser.parseStreamWith(msgBuilder, parserConfig))
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
       sendOutgoing(Outgoing.Raw(bytes))

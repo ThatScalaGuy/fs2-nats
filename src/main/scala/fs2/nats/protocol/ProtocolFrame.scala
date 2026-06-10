@@ -18,13 +18,28 @@ package fs2.nats.protocol
 
 import fs2.Chunk
 
+/** Common supertype of everything the protocol parser can emit.
+  *
+  * The parser is generic over the type it builds for MSG/HMSG *data* frames
+  * (see [[MsgBuilder]]): with the default builder it emits
+  * [[NatsFrame.MsgFrame]] / [[NatsFrame.HMsgFrame]]; the client injects a
+  * builder that constructs the user-facing `subscriptions.NatsMessage`
+  * directly, so the receive path builds that object once instead of
+  * materializing a `MsgFrame` and then re-wrapping it into a `NatsMessage`.
+  * Both `NatsFrame` and `NatsMessage` extend `Frame`, so a transport can expose
+  * a single `Stream[F, Frame]` without depending on the `subscriptions`
+  * package. Deliberately unsealed: `NatsMessage` lives in another package and
+  * so cannot be a sealed-trait case.
+  */
+trait Frame
+
 /** Represents a complete parsed frame from the NATS protocol stream. Each
   * variant corresponds to a specific NATS protocol message.
   *
   * The parser emits these frames which are then processed by the connection
   * manager.
   */
-sealed trait NatsFrame
+sealed trait NatsFrame extends Frame
 
 object NatsFrame:
 
