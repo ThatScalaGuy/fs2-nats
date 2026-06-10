@@ -701,18 +701,23 @@ object JetStream:
     private val EmptyMetadata: JsMetadata =
       JsMetadata("", "", 0L, 0L, 0L, 0L, java.time.Instant.EPOCH, None)
 
-    private def buildJsMessage(m: NatsMessage): F[JsMessage[F]] =
+    private def buildJsMessageE(
+        m: NatsMessage
+    ): Either[NatsError, JsMessage[F]] =
       val reply = m.replyTo.getOrElse("")
       if reply.startsWith("$JS.ACK") then
         JsAckParser.parse(reply) match
-          case Right(meta) => F.pure(new JsMessageImpl(m, meta))
+          case Right(meta) => Right(new JsMessageImpl(m, meta))
           case Left(err)   =>
-            F.raiseError(
+            Left(
               NatsError.ProtocolParseError(
                 s"Invalid JetStream ACK subject: $err"
               )
             )
-      else F.pure(new JsMessageImpl(m, EmptyMetadata))
+      else Right(new JsMessageImpl(m, EmptyMetadata))
+
+    private def buildJsMessage(m: NatsMessage): F[JsMessage[F]] =
+      buildJsMessageE(m).fold(F.raiseError, F.pure)
 
     private final class JsMessageImpl(
         raw: NatsMessage,
@@ -832,24 +837,56 @@ object JetStream:
             Some(opts.idleHeartbeat.min(heartbeatCap))
           )
         yield
+          // Pull batches arrive as bursts, so deliveries are processed a
+          // chunk at a time: one pass classifies and builds the chunk's
+          // messages, and the received counter and any re-pulls are committed
+          // once per chunk instead of paying a separate effect pipeline per
+          // message. `received` is only touched by this single consumer
+          // stream, so the get/set pair is race-free. On a failure status the
+          // messages preceding it in the chunk are still emitted before the
+          // stream is failed (matching the per-message loop this replaces);
+          // the counter is left uncommitted since the stream is ending.
+          def processChunk(
+              c: Chunk[NatsMessage]
+          ): F[(Chunk[JsMessage[F]], Option[NatsError])] =
+            received.get.flatMap { n0 =>
+              var n = n0
+              var pulls = 0
+              var error: NatsError = null
+              val out =
+                new scala.collection.mutable.ArrayBuffer[JsMessage[F]](c.size)
+              val it = c.iterator
+              while it.hasNext && (error eq null) do
+                val m = it.next()
+                PullStatus.classify(m.status, m.statusDescription) match
+                  case PullSignal.Data =>
+                    n += 1
+                    if n >= opts.maxMessages then
+                      n = 0
+                      pulls += 1
+                    buildJsMessageE(m) match
+                      case Right(jm) => out += jm
+                      case Left(e)   => error = e
+                  case PullSignal.Heartbeat => ()
+                  case PullSignal.Complete  =>
+                    n = 0
+                    pulls += 1
+                  case PullSignal.Fail(code, desc) =>
+                    error = NatsError.JetStreamApiError(code, 0, desc)
+              val emit = Chunk.from(out)
+              if error ne null then F.pure((emit, Some(error)))
+              else
+                received.set(n) *>
+                  issuePull(inbox, req).replicateA_(pulls) *>
+                  F.pure((emit, None))
+            }
+
           val dataLoop = Stream.exec(issuePull(inbox, req)) ++
-            inboxStream.evalMapFilter { m =>
-              PullStatus.classify(m.status, m.statusDescription) match
-                case PullSignal.Data =>
-                  received
-                    .modify(n =>
-                      if n + 1 >= opts.maxMessages then (0, true)
-                      else (n + 1, false)
-                    )
-                    .flatMap { rePull =>
-                      (if rePull then issuePull(inbox, req) else F.unit) *>
-                        buildJsMessage(m).map(Some(_))
-                    }
-                case PullSignal.Heartbeat => F.pure(None)
-                case PullSignal.Complete  =>
-                  received.set(0) *> issuePull(inbox, req).as(None)
-                case PullSignal.Fail(code, desc) =>
-                  F.raiseError(NatsError.JetStreamApiError(code, 0, desc))
+            inboxStream.chunks.flatMap { c =>
+              Stream.eval(processChunk(c)).flatMap { (chunk, err) =>
+                Stream.chunk(chunk) ++
+                  err.fold(Stream.empty)(Stream.raiseError[F](_))
+              }
             }
           // Liveness/reconnect safety net: re-issue a pull every `expires` so
           // the loop recovers even when an in-flight request is lost (e.g. on
