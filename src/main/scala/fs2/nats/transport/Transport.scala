@@ -84,6 +84,20 @@ trait Transport[F[_]]:
 
 object Transport:
 
+  /** Bytes requested per socket read. `Socket.reads` hardcodes 8 KiB, which
+    * caps the inbound path at ~8K read effects per 64 MiB and dominates large
+    * payload receive time (e.g. Object Store 128 KiB chunks span 16 reads
+    * each). 64 KiB matches jnats's reader buffer; fs2 reuses one per-socket
+    * buffer grown to the requested size, so this costs no per-read allocation.
+    */
+  private val ReadChunkSize: Int = 64 * 1024
+
+  /** The inbound byte stream of `socket`, read in [[ReadChunkSize]] requests.
+    * Identical to `socket.reads` apart from the per-read size.
+    */
+  private[transport] def reads[F[_]](socket: Socket[F]): Stream[F, Byte] =
+    Stream.repeatEval(socket.read(ReadChunkSize)).unNoneTerminate.unchunks
+
   /** Initial capacity of a writer's reusable coalescing buffer. Sized so a
     * typical drain never has to grow it; a single oversized message grows it
     * once and the larger buffer is retained for the connection's lifetime.

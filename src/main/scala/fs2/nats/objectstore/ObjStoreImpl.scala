@@ -205,7 +205,9 @@ private[nats] object ObjStoreImpl:
               md =>
                 msgs
                   .take(i.chunks)
-                  .evalTap(m => F.delay(md.update(m.payload.toArray)))
+                  // toByteBuffer wraps the payload's backing array (no copy);
+                  // DigestBase consumes array-backed buffers in place.
+                  .evalTap(m => F.delay(md.update(m.payload.toByteBuffer)))
                   .flatMap(m => Stream.chunk(m.payload)) ++
                   Stream.exec(verifyDigest(md, i))
             }
