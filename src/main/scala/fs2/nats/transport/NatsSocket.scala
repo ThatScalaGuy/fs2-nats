@@ -25,6 +25,7 @@ import fs2.io.net.{Network, Socket}
 import fs2.nats.protocol.ParserConfig
 import fs2.nats.protocol.{Frame, MsgBuilder}
 import fs2.nats.protocol.ProtocolParser
+import fs2.nats.util.Queues
 
 /** NATS socket transport implementation.
   *
@@ -84,7 +85,7 @@ object NatsSocket:
   ): Resource[F, Transport[F]] =
     for
       writeQueue <- Resource.eval(
-        Queue.bounded[F, Outgoing](config.writeQueueCapacity)
+        Queues.bounded[F, Outgoing](config.writeQueueCapacity)
       )
       connectedRef <- Resource.eval(Ref.of[F, Boolean](true))
       _ <- Transport.startWriter(socket, writeQueue, connectedRef, config)

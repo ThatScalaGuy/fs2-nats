@@ -22,6 +22,7 @@ import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.nats.client.{ClientEvent, SlowConsumerPolicy}
 import fs2.nats.protocol.Headers
+import fs2.nats.util.Queues
 
 /** Handle for managing a subscription. Provides methods to unsubscribe and
   * configure message delivery.
@@ -202,7 +203,7 @@ object SubscriptionManager:
         queueGroup: Option[String]
     ): F[(Stream[F, NatsMessage], SubscriptionHandle[F])] =
       for
-        queue <- Queue.bounded[F, NatsMessage](queueCapacity)
+        queue <- Queues.bounded[F, NatsMessage](queueCapacity)
         stateRef <- Ref.of[F, SubState](new SubState(true, -1))
         sub = new InternalSubscription[F](
           sid,
