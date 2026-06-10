@@ -106,7 +106,8 @@ object NatsSocket:
   ) extends Transport[F]:
 
     override def frames: Stream[F, Frame] =
-      socket.reads
+      Transport
+        .reads(socket)
         .through(ProtocolParser.parseStreamWith(msgBuilder, parserConfig))
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
