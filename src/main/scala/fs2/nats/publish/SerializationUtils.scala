@@ -186,6 +186,86 @@ object SerializationUtils:
 
     Chunk.array(arr)
 
+  /** Build only the PUB control line `PUB <subject> [reply ]<#bytes>\r\n` (no
+    * payload, no trailing CRLF). The writer appends the payload and the
+    * trailing CRLF directly into its reused buffer, so neither the combined
+    * frame array nor a copy of the payload is allocated per publish.
+    * Byte-for-byte the prefix of [[buildPub]]'s output (asserted by the
+    * wire-equivalence test).
+    */
+  def buildPubHeader(
+      subject: String,
+      replyTo: Option[String],
+      payloadSize: Int
+  ): Array[Byte] =
+    val subjectBytes = subject.getBytes(StandardCharsets.UTF_8)
+    val replyBytes = replyTo match
+      case Some(reply) => reply.getBytes(StandardCharsets.UTF_8)
+      case None        => null
+    val replyExtra = if replyBytes eq null then 0 else replyBytes.length + 1
+
+    val controlLen =
+      PubPrefix.length + subjectBytes.length + 1 + replyExtra +
+        numDigits(payloadSize) + 2
+    val arr = new Array[Byte](controlLen)
+
+    System.arraycopy(PubPrefix, 0, arr, 0, PubPrefix.length)
+    var off = PubPrefix.length
+    System.arraycopy(subjectBytes, 0, arr, off, subjectBytes.length)
+    off += subjectBytes.length
+    arr(off) = Space
+    off += 1
+    if replyBytes ne null then
+      System.arraycopy(replyBytes, 0, arr, off, replyBytes.length)
+      off += replyBytes.length
+      arr(off) = Space
+      off += 1
+    off = writeAsciiInt(arr, off, payloadSize)
+    arr(off) = Cr
+    arr(off + 1) = Lf
+    arr
+
+  /** Build only the HPUB control line
+    * `HPUB <subject> [reply ]<#header bytes> <#total bytes>\r\n` (no headers,
+    * no payload, no trailing CRLF). Counterpart of [[buildPubHeader]] for the
+    * headers path; the writer appends headers, payload and trailing CRLF.
+    */
+  def buildHPubHeader(
+      subject: String,
+      replyTo: Option[String],
+      headerLen: Int,
+      totalLen: Int
+  ): Array[Byte] =
+    val subjectBytes = subject.getBytes(StandardCharsets.UTF_8)
+    val replyBytes = replyTo match
+      case Some(reply) => reply.getBytes(StandardCharsets.UTF_8)
+      case None        => null
+    val replyExtra = if replyBytes eq null then 0 else replyBytes.length + 1
+
+    val controlLen =
+      HpubPrefix.length + subjectBytes.length + 1 + replyExtra +
+        numDigits(headerLen) + 1 + numDigits(totalLen) + 2
+    val arr = new Array[Byte](controlLen)
+
+    System.arraycopy(HpubPrefix, 0, arr, 0, HpubPrefix.length)
+    var off = HpubPrefix.length
+    System.arraycopy(subjectBytes, 0, arr, off, subjectBytes.length)
+    off += subjectBytes.length
+    arr(off) = Space
+    off += 1
+    if replyBytes ne null then
+      System.arraycopy(replyBytes, 0, arr, off, replyBytes.length)
+      off += replyBytes.length
+      arr(off) = Space
+      off += 1
+    off = writeAsciiInt(arr, off, headerLen)
+    arr(off) = Space
+    off += 1
+    off = writeAsciiInt(arr, off, totalLen)
+    arr(off) = Cr
+    arr(off + 1) = Lf
+    arr
+
   /** Number of ASCII decimal digits needed to render a non-negative Int. */
   private def numDigits(n: Int): Int =
     if n < 10 then 1

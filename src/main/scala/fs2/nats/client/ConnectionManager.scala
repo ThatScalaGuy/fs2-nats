@@ -34,7 +34,13 @@ import fs2.nats.protocol.{
   ProtocolParser
 }
 import fs2.nats.publish.SerializationUtils
-import fs2.nats.transport.{NatsSocket, TlsTransport, Transport, TransportConfig}
+import fs2.nats.transport.{
+  NatsSocket,
+  Outgoing,
+  TlsTransport,
+  Transport,
+  TransportConfig
+}
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import java.time.Instant
 
@@ -94,6 +100,13 @@ trait ConnectionManager[F[_]]:
   /** Send bytes through the current transport.
     */
   def send(bytes: Chunk[Byte]): F[Unit]
+
+  /** Send an [[Outgoing]] write descriptor through the current transport. On
+    * the Online fast path the descriptor reaches the writer without allocating
+    * a combined frame array; while Offline it is materialized into a `Chunk`
+    * and held in the reconnect buffer like any other pending write.
+    */
+  def sendOutgoing(out: Outgoing): F[Unit]
 
   /** Stream of incoming NATS frames from the server.
     */
@@ -294,24 +307,30 @@ object ConnectionManager:
       }
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
+      sendOutgoing(Outgoing.Raw(bytes))
+
+    override def sendOutgoing(out: Outgoing): F[Unit] =
       // Fast path: `connRef.get` is a single volatile read (AtomicReference.get)
       // with no allocation. When Online — the overwhelmingly common case — hand
-      // straight to the transport, skipping the `modify` CAS and its per-publish
-      // Either+Some+tuple allocation. `connRef` stays the single source of truth;
-      // a transition racing this read is the same best-effort window the old
-      // `modify`-then-`send` had. Offline/Closed fall through to the authoritative
-      // `modify` path, which also re-checks Online in case a reconnect raced us.
+      // the descriptor straight to the transport, skipping the `modify` CAS and
+      // its per-publish Either+Some+tuple allocation. `connRef` stays the single
+      // source of truth; a transition racing this read is the same best-effort
+      // window the old `modify`-then-`send` had. Offline/Closed fall through to
+      // the authoritative `modify` path, which also re-checks Online in case a
+      // reconnect raced us.
       connRef.get.flatMap {
-        case ConnPhase.Online(t) => t.send(bytes)
-        case _                   => sendBuffered(bytes)
+        case ConnPhase.Online(t) => t.sendOutgoing(out)
+        case _                   => sendBuffered(out)
       }
 
-    /** Slow path for the non-Online phases: atomically buffer (Offline), reject
-      * (Closed), or — if a reconnect transitioned us back Online between the
-      * `connRef.get` above and here — send directly. `connRef.modify` is the
-      * authoritative arbiter so concurrent sends never lose a buffered write.
+    /** Slow path for the non-Online phases: atomically buffer (Offline,
+      * materializing the descriptor into a self-contained `Chunk` so the
+      * reconnect buffer holds a plain value), reject (Closed), or — if a
+      * reconnect transitioned us back Online between the `connRef.get` above
+      * and here — send directly. `connRef.modify` is the authoritative arbiter
+      * so concurrent sends never lose a buffered write.
       */
-    private def sendBuffered(bytes: Chunk[Byte]): F[Unit] =
+    private def sendBuffered(out: Outgoing): F[Unit] =
       connRef
         .modify[Either[NatsError, Option[Transport[F]]]] {
           case online @ ConnPhase.Online(t) =>
@@ -319,6 +338,7 @@ object ConnectionManager:
           case ConnPhase.Closed() =>
             (ConnPhase.Closed(), Left(NatsError.ClientClosed))
           case off @ ConnPhase.Offline(buf, sz) =>
+            val bytes = out.materialize
             val ns = sz + bytes.size
             if config.reconnectBufferSize <= 0 || ns > config.reconnectBufferSize
             then
@@ -331,7 +351,7 @@ object ConnectionManager:
             else (ConnPhase.Offline(buf :+ bytes, ns), Right(None))
         }
         .flatMap {
-          case Right(Some(t)) => t.send(bytes)
+          case Right(Some(t)) => t.sendOutgoing(out)
           case Right(None)    => Async[F].unit
           case Left(err)      => Async[F].raiseError(err)
         }

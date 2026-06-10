@@ -61,6 +61,16 @@ lazy val root = project
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "fs2.nats.transport.Transport.coalesce"
       ),
+      // P1.4: the descriptor write path adds `sendOutgoing` to the internal
+      // Transport and ConnectionManager SPIs and changes the (private)
+      // write-queue element type from Chunk[Byte] to the Outgoing descriptor.
+      // None of these are public API.
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.transport.Transport.sendOutgoing"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.client.ConnectionManager.sendOutgoing"
+      ),
       ProblemFilters.exclude[IncompatibleMethTypeProblem](
         "fs2.nats.publish.Publisher#PublisherImpl.this"
       ),

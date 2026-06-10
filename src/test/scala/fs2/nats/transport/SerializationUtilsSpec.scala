@@ -148,3 +148,124 @@ class SerializationUtilsSpec extends CatsEffectSuite:
       6
     ) // Chinese chars are 3 bytes each
   }
+
+  // --- P1.4 wire-equivalence: the descriptor write path (header + payload
+  // reference, assembled by the writer) must produce bytes byte-for-byte
+  // identical to the old combined-array buildPub/buildHPub. ---
+
+  private def pubWire(
+      subject: String,
+      replyTo: Option[String],
+      payload: Chunk[Byte]
+  ): Seq[Byte] =
+    Outgoing
+      .Pub(
+        SerializationUtils.buildPubHeader(subject, replyTo, payload.size),
+        payload
+      )
+      .materialize
+      .toArray
+      .toSeq
+
+  test("Outgoing.Pub materializes identically to buildPub (no reply-to)") {
+    val payload = Chunk.array("Hello".getBytes)
+    assertEquals(
+      pubWire("FOO.BAR", None, payload),
+      SerializationUtils.buildPub("FOO.BAR", None, payload).toArray.toSeq
+    )
+  }
+
+  test("Outgoing.Pub materializes identically to buildPub (with reply-to)") {
+    val payload = Chunk.array("Hi".getBytes)
+    assertEquals(
+      pubWire("FOO", Some("INBOX.123"), payload),
+      SerializationUtils
+        .buildPub("FOO", Some("INBOX.123"), payload)
+        .toArray
+        .toSeq
+    )
+  }
+
+  test("Outgoing.Pub materializes identically to buildPub (empty payload)") {
+    assertEquals(
+      pubWire("FOO", None, Chunk.empty),
+      SerializationUtils.buildPub("FOO", None, Chunk.empty).toArray.toSeq
+    )
+  }
+
+  test(
+    "Outgoing.Pub materializes identically to buildPub (multi-digit length)"
+  ) {
+    val payload = Chunk.array(Array.fill[Byte](1234)('z'.toByte))
+    assertEquals(
+      pubWire("events.orders.created", Some("_INBOX.abc"), payload),
+      SerializationUtils
+        .buildPub("events.orders.created", Some("_INBOX.abc"), payload)
+        .toArray
+        .toSeq
+    )
+  }
+
+  test("Outgoing.HPub materializes identically to buildHPub") {
+    val headers = Chunk.array("NATS/1.0\r\nX-Test: value\r\n\r\n".getBytes)
+    val payload = Chunk.array("data".getBytes)
+    val descriptor = Outgoing.HPub(
+      SerializationUtils
+        .buildHPubHeader(
+          "FOO",
+          None,
+          headers.size,
+          headers.size + payload.size
+        ),
+      headers,
+      payload
+    )
+    assertEquals(
+      descriptor.materialize.toArray.toSeq,
+      SerializationUtils.buildHPub("FOO", None, headers, payload).toArray.toSeq
+    )
+  }
+
+  test("Outgoing.HPub materializes identically to buildHPub (with reply-to)") {
+    val headers = Chunk.array("NATS/1.0\r\n\r\n".getBytes)
+    val payload = Chunk.array("test".getBytes)
+    val descriptor = Outgoing.HPub(
+      SerializationUtils.buildHPubHeader(
+        "FOO",
+        Some("INBOX.X"),
+        headers.size,
+        headers.size + payload.size
+      ),
+      headers,
+      payload
+    )
+    assertEquals(
+      descriptor.materialize.toArray.toSeq,
+      SerializationUtils
+        .buildHPub("FOO", Some("INBOX.X"), headers, payload)
+        .toArray
+        .toSeq
+    )
+  }
+
+  test("WriteBuffer.fill coalesces a mixed batch to identical wire bytes") {
+    val p1 = Chunk.array("hello".getBytes)
+    val p2 = Chunk.array(Array.fill[Byte](300)('y'.toByte))
+    val hdrs = Chunk.array("NATS/1.0\r\nA: b\r\n\r\n".getBytes)
+    val pub =
+      Outgoing.Pub(SerializationUtils.buildPubHeader("a.b", None, p1.size), p1)
+    val raw =
+      Outgoing.Raw(SerializationUtils.buildPub("c.d", Some("INBOX.z"), p2))
+    val hpub = Outgoing.HPub(
+      SerializationUtils
+        .buildHPubHeader("e.f", None, hdrs.size, hdrs.size + p1.size),
+      hdrs,
+      p1
+    )
+    val batch: Chunk[Outgoing] = Chunk(pub, raw, hpub)
+    val coalesced = (new Transport.WriteBuffer).fill(batch).toArray
+    val expected =
+      pub.materialize.toArray ++ raw.materialize.toArray ++
+        hpub.materialize.toArray
+    assertEquals(coalesced.toSeq, expected.toSeq)
+  }

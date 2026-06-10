@@ -82,7 +82,7 @@ object NatsSocket:
   ): Resource[F, Transport[F]] =
     for
       writeQueue <- Resource.eval(
-        Queue.bounded[F, Chunk[Byte]](config.writeQueueCapacity)
+        Queue.bounded[F, Outgoing](config.writeQueueCapacity)
       )
       connectedRef <- Resource.eval(Ref.of[F, Boolean](true))
       _ <- Transport.startWriter(socket, writeQueue, connectedRef, config)
@@ -95,7 +95,7 @@ object NatsSocket:
 
   private class SocketTransport[F[_]: Async](
       socket: Socket[F],
-      writeQueue: Queue[F, Chunk[Byte]],
+      writeQueue: Queue[F, Outgoing],
       connectedRef: Ref[F, Boolean],
       parserConfig: ParserConfig
   ) extends Transport[F]:
@@ -105,14 +105,17 @@ object NatsSocket:
         .through(ProtocolParser.parseStream(parserConfig))
 
     override def send(bytes: Chunk[Byte]): F[Unit] =
+      sendOutgoing(Outgoing.Raw(bytes))
+
+    override def sendOutgoing(out: Outgoing): F[Unit] =
       connectedRef.get.flatMap { connected =>
-        if connected then writeQueue.offer(bytes)
+        if connected then writeQueue.offer(out)
         else Async[F].raiseError(fs2.nats.errors.NatsError.ClientClosed)
       }
 
     override def close: F[Unit] =
       connectedRef.set(false) *>
-        writeQueue.offer(Transport.WriterPoison) *>
+        writeQueue.offer(Outgoing.Poison) *>
         socket.endOfOutput
 
     override def isConnected: F[Boolean] =
