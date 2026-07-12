@@ -33,9 +33,8 @@ import java.util.concurrent.TimeUnit
   *
   * The `Phase` ADT here mirrors the shape of the (package-private) `ConnPhase`
   * so the only difference between the two benchmark methods is exactly the
-  * coordination change. Run with `-prof gc` and compare
-  * `gc.alloc.rate.norm` (bytes/op): the delta is the garbage removed from the
-  * publish hot path.
+  * coordination change. Run with `-prof gc` and compare `gc.alloc.rate.norm`
+  * (bytes/op): the delta is the garbage removed from the publish hot path.
   *
   * Run:
   * {{{
@@ -70,7 +69,8 @@ class SendCoordinationBenchmark:
   def setup(): Unit =
     ref = Ref.of[IO, Phase](Online(noop)).unsafeRunSync()
 
-  /** Old hot path: modify-with-Either, even though Online never changes state. */
+  /** Old hot path: modify-with-Either, even though Online never changes state.
+    */
   @Benchmark
   def modifyPath(bh: Blackhole): Unit =
     val io = ref
@@ -94,6 +94,6 @@ class SendCoordinationBenchmark:
   def getPath(bh: Blackhole): Unit =
     val io = ref.get.flatMap {
       case Online(s) => s(bytes)
-      case _         => IO.unit // Offline/Closed slow path (unused while Online)
+      case _ => IO.unit // Offline/Closed slow path (unused while Online)
     }
     bh.consume(io.unsafeRunSync())
