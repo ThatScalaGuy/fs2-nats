@@ -29,13 +29,13 @@ import java.util.concurrent.TimeUnit
   * Old path: the parser emitted a `NatsFrame.MsgFrame` (which crossed the frame
   * stream and so genuinely escaped), then the subscription router re-wrapped it
   * into the user-facing `NatsMessage` — two objects per message. New path: the
-  * parser builds the `NatsMessage` directly via `NatsMessage.parserBuilder` — one
-  * object. The `Blackhole.consume(frame)` in the `old*` methods reproduces that
-  * escape so the JIT cannot scalar-replace the intermediate frame and hide the
-  * difference (in the real pipeline the frame is emitted downstream).
+  * parser builds the `NatsMessage` directly via `NatsMessage.parserBuilder` —
+  * one object. The `Blackhole.consume(frame)` in the `old*` methods reproduces
+  * that escape so the JIT cannot scalar-replace the intermediate frame and hide
+  * the difference (in the real pipeline the frame is emitted downstream).
   *
-  * Run with `-prof gc` and compare `gc.alloc.rate.norm` (bytes/op): the delta is
-  * the eliminated frame object. The subject/replyTo/payload are shared by
+  * Run with `-prof gc` and compare `gc.alloc.rate.norm` (bytes/op): the delta
+  * is the eliminated frame object. The subject/replyTo/payload are shared by
   * reference in both, so only the wrapper object is saved.
   *
   * Run:

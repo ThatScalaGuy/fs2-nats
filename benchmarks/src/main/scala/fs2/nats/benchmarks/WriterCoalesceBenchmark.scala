@@ -25,10 +25,11 @@ import java.util.concurrent.TimeUnit
   *
   * The old writer built a fresh `Array[Byte](total)` for every multi-frame
   * drain (`Transport.coalesce`); the new writer copies the drain into a single
-  * grow-only buffer reused across drains (`Transport.WriteBuffer.fill`). The two
-  * methods below are those exact code paths. Run with `-prof gc` and compare
-  * `gc.alloc.rate.norm` (bytes/op): the delta is the garbage removed per drain,
-  * which is ~the batch's total byte size and grows with load (bigger drains).
+  * grow-only buffer reused across drains (`Transport.WriteBuffer.fill`). The
+  * two methods below are those exact code paths. Run with `-prof gc` and
+  * compare `gc.alloc.rate.norm` (bytes/op): the delta is the garbage removed
+  * per drain, which is ~the batch's total byte size and grows with load (bigger
+  * drains).
   *
   * Run:
   * {{{
@@ -53,10 +54,13 @@ class WriterCoalesceBenchmark:
   @Setup
   def setup(): Unit =
     // A representative small PUB frame (16-byte payload).
-    val frame = Chunk.array(("PUB events.x 16\r\n" + "x" * 16 + "\r\n").getBytes)
+    val frame =
+      Chunk.array(("PUB events.x 16\r\n" + "x" * 16 + "\r\n").getBytes)
     batch = Chunk.from(Vector.fill(batchSize)(frame))
 
-  /** Old `Transport.coalesce`: a fresh array sized to the whole batch per drain. */
+  /** Old `Transport.coalesce`: a fresh array sized to the whole batch per
+    * drain.
+    */
   @Benchmark
   def coalesceFreshArray(bh: Blackhole): Unit =
     var total = 0
@@ -74,7 +78,9 @@ class WriterCoalesceBenchmark:
       i += 1
     bh.consume(Chunk.array(arr))
 
-  /** New `WriteBuffer.fill`: copy into the reused buffer, grow only on overflow. */
+  /** New `WriteBuffer.fill`: copy into the reused buffer, grow only on
+    * overflow.
+    */
   @Benchmark
   def reusedBuffer(bh: Blackhole): Unit =
     var total = 0
