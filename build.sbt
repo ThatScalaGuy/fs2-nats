@@ -176,6 +176,23 @@ lazy val root = project
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "fs2.nats.client.Requestor#RequestorImpl.this"
       ),
+      // perf #47: the pipelined publish path grows a split-phase `requestAsync`
+      // on the internal Requestor SPI and on NatsClient (where `private[nats]`
+      // still emits a public abstract interface method, so MiMa flags it), and
+      // JetStreamImpl no longer needs a Supervisor now that publishAsync runs
+      // no per-message fiber. Neither Requestor nor JetStreamImpl is
+      // constructible from outside (Requestor.apply needs a SubscriptionManager
+      // and a SidAllocator; JetStreamImpl is object-private, merely emitted as a
+      // public classfile), and the frozen public NatsClient surface is unchanged.
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.client.Requestor.requestAsync"
+      ),
+      ProblemFilters.exclude[ReversedMissingMethodProblem](
+        "fs2.nats.client.NatsClient.requestAsync"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.jetstream.JetStream#JetStreamImpl.this"
+      ),
       // JetStream P1: the request/reply primitive adds `request` to the
       // NatsClient trait and surfaces the status line code + description on
       // HMsgFrame and NatsMessage (new fields with defaults). These are

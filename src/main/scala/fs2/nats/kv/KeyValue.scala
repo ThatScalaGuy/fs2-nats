@@ -130,7 +130,9 @@ trait KeyValue[F[_]]:
   def put(key: String, value: Chunk[Byte]): F[Long]
 
   /** Pipelined put: the outer effect completes once a publish-window slot is
-    * taken; the inner effect yields the new revision (or fails).
+    * taken and the request is on the wire; the inner effect yields the new
+    * revision (or fails). The slot is freed when the request settles, whether
+    * or not the inner effect is ever run.
     */
   def putAsync(key: String, value: Chunk[Byte]): F[F[Long]]
 

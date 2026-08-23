@@ -16,8 +16,8 @@
 
 package fs2.nats.jetstream
 
-import cats.effect.{Async, Deferred, Ref, Resource}
-import cats.effect.std.{Semaphore, Supervisor}
+import cats.effect.{Async, Ref, Resource}
+import cats.effect.std.Semaphore
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
@@ -38,6 +38,8 @@ import fs2.nats.util.Tokens
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicBoolean
+
 import scala.concurrent.duration.*
 
 /** Configuration for a JetStream context.
@@ -91,7 +93,11 @@ trait JetStream[F[_]]:
   ): F[PubAck]
 
   /** Pipelined publish: the outer effect completes once an in-flight window
-    * slot is taken; the inner effect yields the `PubAck` (or fails).
+    * slot is taken and the request is on the wire (so it can also back-pressure
+    * on the transport write queue); the inner effect yields the `PubAck` (or
+    * fails). Publish failures always surface on the inner effect, and the
+    * in-flight slot is freed when the request settles whether or not the inner
+    * effect is ever run.
     */
   def publishAsync(
       subject: String,
@@ -221,25 +227,21 @@ object JetStream:
       client: NatsClient[F],
       config: JetStreamConfig
   ): Resource[F, JetStream[F]] =
-    for
-      window <- Resource.eval(
+    for window <- Resource.eval(
         Semaphore[F](math.max(1, config.publishAsyncMaxPending).toLong)
       )
-      supervisor <- Supervisor[F]
     yield new JetStreamImpl[F](
       client,
       config,
       ApiSubjects(config.apiPrefix, config.domain),
-      window,
-      supervisor
+      window
     )
 
   private final class JetStreamImpl[F[_]: Async](
       client: NatsClient[F],
       config: JetStreamConfig,
       subjects: ApiSubjects,
-      window: Semaphore[F],
-      supervisor: Supervisor[F]
+      window: Semaphore[F]
   ) extends JetStream[F]:
 
     private val F = Async[F]
@@ -254,12 +256,16 @@ object JetStream:
     ): F[PubAck] =
       val merged = mergePublishHeaders(headers, opts)
       val timeout = opts.timeout.getOrElse(config.timeout)
-      client
-        .request(subject, payload, merged, timeout)
+      toPubAck(subject)(client.request(subject, payload, merged, timeout))
+
+    // A 503 reply carries an empty body, so the NoResponders mapping has to run
+    // before the JSON decode or the caller sees a parse failure instead.
+    private def toPubAck(subject: String)(reply: F[NatsMessage]): F[PubAck] =
+      reply
         .adaptError { case NatsError.NoResponders(_) =>
           NatsError.JetStreamPublishNoAck(subject)
         }
-        .flatMap(reply => decode[PubAck](reply.payload))
+        .flatMap(r => decode[PubAck](r.payload))
 
     override def publishAsync(
         subject: String,
@@ -267,20 +273,40 @@ object JetStream:
         headers: Headers,
         opts: PublishOptions
     ): F[F[PubAck]] =
-      // Mask acquire->spawn so a cancel can't hold a permit whose releasing
-      // fiber never started (which would shrink the window toward deadlock).
-      // The acquire wait and the returned slot.get stay pollable.
-      F.uncancelable { poll =>
-        poll(window.acquire) *>
-          Deferred[F, Either[Throwable, PubAck]].flatMap { slot =>
-            supervisor
-              .supervise(
-                publish(subject, payload, headers, opts).attempt
-                  .flatMap(slot.complete)
-                  .guarantee(window.release)
-              )
-              .as(slot.get.rethrow)
-          }
+      val merged = mergePublishHeaders(headers, opts)
+      val timeout = opts.timeout.getOrElse(config.timeout)
+      // No fiber, no supervisor entry and no second Deferred per message: the
+      // request publishes inline and the permit is released by the settle hook
+      // on whichever fiber settles the request, so the window keeps meaning
+      // "requests in flight" and still drains when the caller is holding a
+      // batch of un-run inner effects (the Object Store put shape).
+      // `acquire` is masked so a cancel cannot strand a permit; the publish
+      // inside `requestAsync` stays pollable because it can block on the
+      // bounded write queue. Capturing an outer failure back into a failed
+      // inner effect keeps the documented contract that publish failures
+      // surface there.
+      //
+      // The settle hook and the caller-side cancel/error paths are independent
+      // parties: a cancellation can be observed here before `requestAsync` ever
+      // registers the request (nobody would run the hook) and equally after the
+      // request has already settled on the drain fiber (the hook has run).
+      // `Semaphore` has no ceiling, so a double release would permanently widen
+      // the window past `publishAsyncMaxPending`. One-shot CAS: whoever gets
+      // there first hands the permit back, exactly once. The flag is per
+      // message, never escapes this effect, and is only read through the CAS.
+      F.delay(new AtomicBoolean(false)).flatMap { released =>
+        val release =
+          F.delay(released.compareAndSet(false, true))
+            .ifM(window.release, F.unit)
+        F.uncancelable { poll =>
+          poll(window.acquire) *>
+            poll(
+              client.requestAsync(subject, payload, merged, timeout, release)
+            )
+              .map(reply => toPubAck(subject)(reply))
+              .onCancel(release)
+              .handleErrorWith(t => release.as(F.raiseError[PubAck](t)))
+        }
       }
 
     private def mergePublishHeaders(

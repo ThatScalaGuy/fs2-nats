@@ -76,6 +76,16 @@ class RequestorSpec extends CatsEffectSuite:
 
     override def updateMaxPayload(maxPayload: Long): IO[Unit] = IO.unit
 
+  /** Poll until `ref` reaches `n`. Requests settle on the drain fiber (or the
+    * sweeper), so the settle count is only eventually consistent with routing.
+    */
+  private def awaitCount(ref: Ref[IO, Int], n: Int): IO[Unit] =
+    ref.get
+      .flatMap(c =>
+        if c >= n then IO.unit else IO.sleep(5.millis) *> awaitCount(ref, n)
+      )
+      .timeout(5.seconds)
+
   private case class Harness(
       requestor: Requestor[IO],
       subManager: SubscriptionManager[IO],
@@ -294,6 +304,167 @@ class RequestorSpec extends CatsEffectSuite:
         // requests on a connection get base62(0) and base62(1).
         _ = assertEquals(calls(0).replyTo, Some(s"${h.inboxPrefix}.0"))
         _ = assertEquals(calls(1).replyTo, Some(s"${h.inboxPrefix}.1"))
+      yield ()
+    }
+  }
+
+  test("the settle hook runs once when the reply arrives") {
+    harness.use { h =>
+      for
+        settled <- Ref.of[IO, Int](0)
+        _ <- h.answerInline(_ => chunk("ack"))
+        wait <- h.requestor.requestAsync(
+          "svc.async",
+          chunk("q"),
+          Headers.empty,
+          5.seconds,
+          settled.update(_ + 1)
+        )
+        first <- wait
+        _ = assertEquals(first.payloadAsString, "ack")
+        // The inner effect carries no finalizer, so re-running it replays the
+        // stored outcome without settling a second time.
+        second <- wait
+        _ = assertEquals(second.payloadAsString, "ack")
+        count <- settled.get
+        _ = assertEquals(count, 1)
+      yield ()
+    }
+  }
+
+  test("pipelined requests settle before any wait effect is run") {
+    harness.use { h =>
+      // More than the default publishAsync window (256): the whole point of the
+      // settle hook is that a caller may collect every wait effect and run none
+      // of them until the last publish has gone out.
+      val n = 300
+      for
+        settled <- Ref.of[IO, Int](0)
+        waits <- (1 to n).toList.traverse { i =>
+          h.requestor.requestAsync(
+            "svc.pipe",
+            chunk(s"req-$i"),
+            Headers.empty,
+            5.seconds,
+            settled.update(_ + 1)
+          )
+        }
+        calls <- h.calls.get
+        _ = assertEquals(calls.length, n)
+        _ <- calls.toList.traverse_(c =>
+          h.routeReply(c.reply, chunk("reply-" + c.payloadAsString))
+        )
+        _ <- awaitCount(settled, n)
+        results <- waits.traverse(_.map(_.payloadAsString))
+        _ = assertEquals(results, (1 to n).toList.map(i => s"reply-req-$i"))
+      yield ()
+    }
+  }
+
+  test("an un-awaited request expires and frees its slot") {
+    harness.use { h =>
+      for
+        settled <- Ref.of[IO, Int](0)
+        wait <- h.requestor.requestAsync(
+          "svc.abandoned",
+          chunk("q"),
+          Headers.empty,
+          100.millis,
+          settled.update(_ + 1)
+        )
+        // Nobody runs `wait`; only the connection sweeper can settle this one.
+        _ <- awaitCount(settled, 1)
+        first <- wait.attempt
+        _ = assertEquals(
+          first.left.toOption,
+          Some(NatsError.Timeout("request to 'svc.abandoned'", 100L))
+        )
+        second <- wait.attempt
+        _ = assertEquals(second.left.toOption, first.left.toOption)
+        count <- settled.get
+        _ = assertEquals(count, 1)
+        _ <- h.assertDrainAlive("after-abandoned")
+      yield ()
+    }
+  }
+
+  test("the reply budget starts at the publish, not at the registration") {
+    harness.use { h =>
+      // The publish back-pressures for longer than both the request timeout and
+      // a sweeper tick. Neither may consume the reply budget: the slot has to be
+      // in the map before the publish, but the clock only starts once the
+      // request is actually on the wire.
+      for
+        settled <- Ref.of[IO, Int](0)
+        _ <- h.hook.set(_ => IO.sleep(1300.millis))
+        wait <- h.requestor.requestAsync(
+          "svc.backpressured",
+          chunk("q"),
+          Headers.empty,
+          200.millis,
+          settled.update(_ + 1)
+        )
+        duringPublish <- settled.get
+        _ = assertEquals(duringPublish, 0)
+        call <- h.awaitCall(1)
+        _ <- h.hook.set(_ => IO.unit)
+        fiber <- wait.start
+        _ <- IO.sleep(20.millis)
+        _ <- h.routeReply(call.reply, chunk("in-budget"))
+        msg <- fiber.joinWithNever
+        _ = assertEquals(msg.payloadAsString, "in-budget")
+        count <- settled.get
+        _ = assertEquals(count, 1)
+      yield ()
+    }
+  }
+
+  test("a failed publish fails the outer effect and does not run the hook") {
+    harness.use { h =>
+      val boom = new RuntimeException("publish failed")
+      for
+        settled <- Ref.of[IO, Int](0)
+        _ <- h.hook.set(_ => IO.raiseError(boom))
+        attempt <- h.requestor
+          .requestAsync(
+            "svc.broken",
+            chunk("q"),
+            Headers.empty,
+            5.seconds,
+            settled.update(_ + 1)
+          )
+          .attempt
+        _ = assertEquals(attempt.left.toOption, Some(boom))
+        count <- settled.get
+        _ = assertEquals(count, 0)
+        _ <- h.assertDrainAlive("after-publish-failure")
+      yield ()
+    }
+  }
+
+  test("a cancelled outer effect does not run the settle hook") {
+    harness.use { h =>
+      for
+        settled <- Ref.of[IO, Int](0)
+        gate <- IO.deferred[Unit]
+        _ <- h.hook.set(_ => gate.get)
+        fiber <- h.requestor
+          .requestAsync(
+            "svc.cancelled",
+            chunk("q"),
+            Headers.empty,
+            5.seconds,
+            settled.update(_ + 1)
+          )
+          .start
+        call <- h.awaitCall(1)
+        _ <- fiber.cancel
+        _ <- gate.complete(()).attempt
+        // The slot is gone, so the late reply must be a silent no-op.
+        _ <- h.routeReply(call.reply, chunk("late"))
+        count <- settled.get
+        _ = assertEquals(count, 0)
+        _ <- h.assertDrainAlive("after-async-cancel")
       yield ()
     }
   }

@@ -105,6 +105,21 @@ trait NatsClient[F[_]]:
       timeout: FiniteDuration = 5.seconds
   ): F[NatsMessage]
 
+  /** Split-phase request: the outer effect registers the correlation slot and
+    * publishes, the returned inner effect awaits the reply. `onSettle` runs
+    * exactly once when the request settles, on whichever fiber settles it, and
+    * is not run when this outer effect fails or is cancelled. Internal: used by
+    * the pipelined JetStream publish path; `Requestor.requestAsync` carries the
+    * full contract.
+    */
+  private[nats] def requestAsync(
+      subject: String,
+      payload: Chunk[Byte],
+      headers: Headers,
+      timeout: FiniteDuration,
+      onSettle: F[Unit]
+  ): F[F[NatsMessage]]
+
   /** Create a JetStream context over this connection.
     *
     * The returned `Resource` scopes the JetStream context's resources (publish
@@ -371,6 +386,23 @@ object NatsClient:
         timeout: FiniteDuration
     ): F[NatsMessage] =
       checkClosed *> requestor.request(subject, payload, headers, timeout)
+
+    override private[nats] def requestAsync(
+        subject: String,
+        payload: Chunk[Byte],
+        headers: Headers,
+        timeout: FiniteDuration,
+        onSettle: F[Unit]
+    ): F[F[NatsMessage]] =
+      // `ClientClosed` raised here fails the OUTER effect, before the settle
+      // hook exists; the caller owns its resource on that path.
+      checkClosed *> requestor.requestAsync(
+        subject,
+        payload,
+        headers,
+        timeout,
+        onSettle
+      )
 
     override def jetStream(
         config: JetStreamConfig

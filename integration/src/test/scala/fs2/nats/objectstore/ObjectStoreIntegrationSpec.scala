@@ -94,6 +94,26 @@ class ObjectStoreIntegrationSpec extends CatsEffectSuite:
     }
   }
 
+  test("an object with more chunks than the publish window round-trips") {
+    val b = uniqueBucket
+    withObj(b) { (_, os) =>
+      // 300 chunks against the default 256-slot publishAsync window: `put`
+      // collects every in-flight ack effect before awaiting any of them, so
+      // this deadlocks unless the window permit is released when the request
+      // settles rather than when the caller awaits it.
+      val data = bytes(300 * 1024)
+      for
+        info <- os.put(
+          ObjectMeta("wide.bin", maxChunkSize = 1024),
+          Stream.chunk(data)
+        )
+        got <- os.getBytes("wide.bin")
+      yield
+        assertEquals(info.chunks, 300L)
+        assertEquals(got.map(_.toList), Some(data.toList))
+    }
+  }
+
   test("get on a tampered digest raises ObjectDigestMismatch") {
     val b = uniqueBucket
     withObj(b) { (js, os) =>
