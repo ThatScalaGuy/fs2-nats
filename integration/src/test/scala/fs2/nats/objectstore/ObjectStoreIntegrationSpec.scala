@@ -94,6 +94,29 @@ class ObjectStoreIntegrationSpec extends CatsEffectSuite:
     }
   }
 
+  test("a source whose chunks straddle maxChunkSize round-trips") {
+    val b = uniqueBucket
+    withObj(b) { (_, os) =>
+      // 3000-byte source chunks against a 4096-byte maxChunkSize: chunkN has
+      // to splice two or three source chunks into each published chunk, so
+      // put sees composite Chunk.Queue payloads rather than flat slices. The
+      // read path recomputes the SHA-256, so a skipped or mis-ordered queue
+      // leaf on the put side surfaces here as ObjectDigestMismatch.
+      val data = bytes(12000)
+      val src = Stream
+        .emits(0 until 4)
+        .flatMap(i => Stream.chunk(data.drop(i * 3000).take(3000)))
+        .covary[IO]
+      for
+        info <- os.put(ObjectMeta("straddle.bin", maxChunkSize = 4096), src)
+        got <- os.getBytes("straddle.bin")
+      yield
+        assertEquals(info.size, 12000L)
+        assertEquals(info.chunks, 3L)
+        assertEquals(got.map(_.toList), Some(data.toList))
+    }
+  }
+
   test("an object with more chunks than the publish window round-trips") {
     val b = uniqueBucket
     withObj(b) { (_, os) =>

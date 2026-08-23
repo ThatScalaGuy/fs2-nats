@@ -117,14 +117,16 @@ private[nats] object ObjStoreImpl:
             nuid <- Tokens.randomInboxId[F](22)
             chunkSubj = ObjNames.chunkSubject(bucket, nuid)
             md <- F.delay(MessageDigest.getInstance("SHA-256"))
-            // Rechunk to exact-size chunks; fold SHA-256 in order on this single
-            // fiber, and pipeline each chunk publish through the bounded
-            // publishAsync window (transport coalescing batches the writes).
-            // Collect the in-flight PubAck effects to await durability.
+            // Rechunk to exact-size chunks; fold SHA-256 in order on this
+            // single fiber, reading each chunk in place rather than flattening
+            // it into a throwaway array, and pipeline each chunk publish
+            // through the bounded publishAsync window (transport coalescing
+            // batches the writes). Collect the in-flight PubAck effects to
+            // await durability.
             acks <- data
               .chunkN(meta.maxChunkSize, allowFewer = true)
               .evalMap { c =>
-                (F.delay(md.update(c.toArray)) *> js.publishAsync(chunkSubj, c))
+                (F.delay(digestChunk(md, c)) *> js.publishAsync(chunkSubj, c))
                   .map(ack => (c.size.toLong, ack))
               }
               .compile
@@ -169,6 +171,19 @@ private[nats] object ObjStoreImpl:
 
     override def putFile(name: String, path: Path): F[ObjectInfo] =
       put(ObjectMeta(name), Files.forAsync[F].readAll(path))
+
+    /** Folds `c` into `md` without copying it. `chunkN` emits either an array
+      * slice of the source array or a composite `Chunk.Queue` whose leaves are
+      * array-backed slices; `toByteBuffer` wraps such a leaf in place, the same
+      * trick the read path uses, so object data is never duplicated just to be
+      * hashed. Leaves are walked in queue order, which is the order they reach
+      * the wire, so the digest value is unchanged. Any other leaf shape falls
+      * back to `toByteBuffer`'s own conversion.
+      */
+    private def digestChunk(md: MessageDigest, c: Chunk[Byte]): Unit =
+      c match
+        case q: Chunk.Queue[Byte] => q.chunks.foreach(digestChunk(md, _))
+        case _ => if c.nonEmpty then md.update(c.toByteBuffer)
 
     // ---- Get ----
 
