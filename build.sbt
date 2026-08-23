@@ -245,6 +245,19 @@ lazy val root = project
       ),
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "fs2.nats.jetstream.protocol.StreamConfig.this"
+      ),
+      // #44: TransportConfig gains a defaulted `socketOptions` field so the
+      // client can set TCP_NODELAY at connect. New case-class fields change the
+      // synthesized apply/copy/constructor signatures; the type is a config
+      // carrier constructed by name at every call site.
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TransportConfig.apply"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TransportConfig.copy"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.transport.TransportConfig.this"
       )
     )
   )

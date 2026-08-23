@@ -108,8 +108,15 @@ Top allocators that the Tier 1–3 work removes from the hot paths:
 
 ## Caveat — TCP_NODELAY
 
-The client connects with default socket options, so **Nagle's algorithm is on**.
-That OS-level coalescing can mask or distort the app-level write-coalescing and
-inflate small-message latency. Setting `TCP_NODELAY` on the client socket is a
-worthwhile follow-up (the library does not currently expose socket options);
-keep it in mind when interpreting latency numbers.
+The client now sets `TCP_NODELAY` by default, via
+`TransportConfig.socketOptions`, on every socket it dials (plaintext and the
+bare socket under TLS alike). Do not expect this harness to show it: loopback
+and the docker bridge acknowledge immediately, so Nagle never has an
+unacknowledged segment to hold a write behind. `ThroughputBench.latency()` is
+additionally a serial publish/receive round trip — a shape Nagle cannot stall,
+since the reply carries the ACK — so its p50 is unchanged either way.
+
+Demonstrating the win needs an artificially delayed link (e.g.
+`tc qdisc add dev lo root netem delay 5ms`) plus a mixed workload: a
+fire-and-forget publisher running concurrently with request/reply calls,
+reported at p99/p99.9. That is not part of this suite.

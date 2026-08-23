@@ -491,7 +491,10 @@ object ConnectionManager:
             // (the standard flow; `handshake_first` servers are not supported).
             val resource =
               for
-                socket <- Network[F].connect(address)
+                socket <- Network[F].connect(
+                  address,
+                  transportConfig.socketOptions
+                )
                 info <- Resource.eval(readPlaintextInfo(socket))
                 transport <- TlsTransport.wrap(
                   ctx,
