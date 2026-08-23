@@ -168,6 +168,14 @@ lazy val root = project
       ProblemFilters.exclude[IncompatibleMethTypeProblem](
         "fs2.nats.subscriptions.SubscriptionManager#SubscriptionHandleImpl.this"
       ),
+      // perf #49: the request-correlation map and token counter moved from two
+      // shared Refs into a ConcurrentHashMap and an AtomicLong held as fields on
+      // RequestorImpl, so the constructor no longer takes them. RequestorImpl is
+      // an object-private implementation class emitted as a public classfile,
+      // not public API; trait Requestor and Requestor.apply are unchanged.
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.client.Requestor#RequestorImpl.this"
+      ),
       // JetStream P1: the request/reply primitive adds `request` to the
       // NatsClient trait and surfaces the status line code + description on
       // HMsgFrame and NatsMessage (new fields with defaults). These are

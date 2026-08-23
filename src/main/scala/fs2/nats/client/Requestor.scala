@@ -16,7 +16,7 @@
 
 package fs2.nats.client
 
-import cats.effect.{Async, Deferred, Ref}
+import cats.effect.{Async, Deferred}
 import cats.effect.std.Supervisor
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
@@ -26,6 +26,9 @@ import fs2.nats.protocol.Headers
 import fs2.nats.publish.{Publisher, SerializationUtils}
 import fs2.nats.subscriptions.{NatsMessage, SidAllocator, SubscriptionManager}
 import fs2.nats.util.Tokens
+
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -96,25 +99,35 @@ object Requestor:
       inboxId <- Tokens.randomInboxId[F]()
       inboxPrefix = s"_INBOX.$inboxId"
       wildcard = s"$inboxPrefix.*"
-      pending <- Ref.of[F, Map[String, Deferred[F, NatsMessage]]](Map.empty)
-      counter <- Ref.of[F, Long](0L)
       sid <- sidAllocator.next
       registered <- subManager.register(sid, wildcard, None)
       (stream, _) = registered
       _ <- send(SerializationUtils.buildSub(wildcard, None, sid))
-      impl = new RequestorImpl[F](inboxPrefix, pending, counter, publisher)
+      impl = new RequestorImpl[F](inboxPrefix, publisher)
       _ <- supervisor.supervise(impl.drain(stream)).void
     yield impl
 
   private class RequestorImpl[F[_]: Async](
       inboxPrefix: String,
-      pending: Ref[F, Map[String, Deferred[F, NatsMessage]]],
-      counter: Ref[F, Long],
       publisher: Publisher[F]
   ) extends Requestor[F]:
 
     // Replies arrive on "<inboxPrefix>.<token>"; this is where the token starts.
     private val tokenStart = inboxPrefix.length + 1
+
+    // Correlation state as plain concurrent primitives rather than Refs: every
+    // request otherwise costs four compare-and-set loops on two shared cells
+    // (counter draw, insert, reply-side take, guaranteed remove), and a lost
+    // CAS on the pending map re-copies the whole immutable map before retrying.
+    // The cells are created per connection and only ever touched from inside a
+    // running effect (a delay, or a flatMap continuation the runtime re-enters
+    // on every run), so the mutation is not observable as a side effect through
+    // the pure API. Sized for the pipelined-publish window (publishAsync allows
+    // 256 in flight by default) so a long-lived connection does not walk the
+    // default 16 -> 512 resize ladder.
+    private val pending =
+      new ConcurrentHashMap[String, Deferred[F, NatsMessage]](256)
+    private val counter = new AtomicLong(0L)
 
     /** Drain the inbox subscription, completing the pending `Deferred` that
       * matches each reply's token. Runs until the subscription stream ends.
@@ -123,15 +136,17 @@ object Requestor:
       stream.evalMap(handleReply).compile.drain
 
     private def handleReply(msg: NatsMessage): F[Unit] =
-      val token =
-        if msg.subject.length > tokenStart then
-          msg.subject.substring(tokenStart)
-        else ""
-      pending
-        .modify { m =>
-          m.get(token) match
-            case Some(d) => (m - token, Some(d))
-            case None    => (m, None)
+      Async[F]
+        .delay {
+          val token =
+            if msg.subject.length > tokenStart then
+              msg.subject.substring(tokenStart)
+            else ""
+          // `remove` is the atomic get-and-remove the `Ref.modify` provided:
+          // it is what keeps completion at-most-once for a duplicate or late
+          // reply. A ConcurrentHashMap holds no null values, so a null return
+          // is an unambiguous miss.
+          Option(pending.remove(token))
         }
         .flatMap {
           case None    => Async[F].unit
@@ -145,11 +160,11 @@ object Requestor:
         timeout: FiniteDuration
     ): F[NatsMessage] =
       for
-        n <- counter.getAndUpdate(_ + 1)
+        n <- Async[F].delay(counter.getAndIncrement())
         token = Tokens.base62(n)
         reply = s"$inboxPrefix.$token"
         d <- Deferred[F, NatsMessage]
-        _ <- pending.update(_ + (token -> d))
+        _ <- Async[F].delay(pending.put(token, d)).void
         result <-
           (publishRequest(subject, payload, headers, reply) *>
             d.get.timeoutTo(
@@ -157,7 +172,7 @@ object Requestor:
               Async[F].raiseError[NatsMessage](
                 NatsError.Timeout(s"request to '$subject'", timeout.toMillis)
               )
-            )).guarantee(pending.update(_ - token))
+            )).guarantee(Async[F].delay(pending.remove(token)).void)
         msg <-
           if result.status.contains(503) then
             Async[F].raiseError[NatsMessage](NatsError.NoResponders(subject))
