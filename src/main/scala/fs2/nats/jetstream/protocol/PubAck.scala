@@ -39,3 +39,21 @@ final case class PubAck(
 
 object PubAck:
   given JsonValueCodec[PubAck] = JsonCodecMaker.make(JsWire.snake)
+
+/** Decode-only mirror of [[PubAck]] that also carries the `error` envelope the
+  * server sends inline on a failed publish, so the publish path parses the
+  * reply once instead of probing for the envelope and then re-reading it. Every
+  * field is defaulted because an error reply carries none of them; `stream` and
+  * `seq` use sentinels so a truncated success reply is still rejected the way
+  * [[PubAck]]'s required fields reject it today.
+  */
+private[jetstream] final case class PubAckResponse(
+    stream: String = null,
+    seq: Long = -1L,
+    duplicate: Boolean = false,
+    domain: Option[String] = None,
+    error: Option[ApiError] = None
+)
+
+private[jetstream] object PubAckResponse:
+  given JsonValueCodec[PubAckResponse] = JsonCodecMaker.make(JsWire.snake)

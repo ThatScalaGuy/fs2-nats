@@ -167,6 +167,35 @@ class JsProtocolSpec extends FunSuite:
     )
   }
 
+  test("PubAckResponse decodes a success ack") {
+    val r = readFromString[PubAckResponse](
+      """{"stream":"ORDERS","seq":7,"duplicate":true}"""
+    )
+    assertEquals(r.stream, "ORDERS")
+    assertEquals(r.seq, 7L)
+    assertEquals(r.duplicate, true)
+    assertEquals(r.domain, None)
+    assertEquals(r.error, None)
+  }
+
+  test("PubAckResponse decodes an inline error envelope") {
+    val r = readFromString[PubAckResponse](
+      """{"type":"io.nats.jetstream.api.v1.pub_ack_response","error":{"code":400,"err_code":10071,"description":"wrong last sequence: 5"}}"""
+    )
+    assertEquals(r.error, Some(ApiError(400, 10071, "wrong last sequence: 5")))
+  }
+
+  test("PubAckResponse leaves sentinels for a truncated ack") {
+    assertEquals(
+      readFromString[PubAckResponse]("""{"stream":"ORDERS"}""").seq,
+      -1L
+    )
+    assertEquals(
+      readFromString[PubAckResponse]("""{"seq":1}""").stream,
+      null.asInstanceOf[String]
+    )
+  }
+
   test("ApiError decodes from the error envelope") {
     val env = readFromString[ApiErrorEnvelope](
       """{"type":"io.nats.jetstream.api.v1.pub_ack_response","error":{"code":400,"err_code":10071,"description":"wrong last sequence: 5"}}"""

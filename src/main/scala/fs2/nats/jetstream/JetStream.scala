@@ -265,7 +265,7 @@ object JetStream:
         .adaptError { case NatsError.NoResponders(_) =>
           NatsError.JetStreamPublishNoAck(subject)
         }
-        .flatMap(r => decode[PubAck](r.payload))
+        .flatMap(r => decodePubAck(r.payload))
 
     override def publishAsync(
         subject: String,
@@ -947,6 +947,23 @@ object JetStream:
     private def jsonBody[A](a: A)(using JsonValueCodec[A]): Chunk[Byte] =
       Chunk.array(writeToArray(a))
 
+    // Reply payloads arrive from the parser as exact-fit arrays, so jsoniter
+    // can read them in place: `JsonReader` only borrows the caller's buffer
+    // and restores its own in a `finally`, and it never writes into it, so
+    // aliasing the chunk's array is not observable and the decode stays
+    // repeatable (publishAsync's inner effect may be run more than once).
+    // Chunks of size 0 or 1 are not `ArraySlice`, so they still need a copy.
+    private def readJson[A](payload: Chunk[Byte])(using
+        JsonValueCodec[A]
+    ): A =
+      payload match
+        case s: Chunk.ArraySlice[?] =>
+          s.values match
+            case a: Array[Byte] =>
+              readFromSubArray[A](a, s.offset, s.offset + s.length)
+            case _ => readFromArray[A](payload.toArray)
+        case _ => readFromArray[A](payload.toArray)
+
     private def apiRequest[A: JsonValueCodec](
         subject: String,
         body: Chunk[Byte]
@@ -961,41 +978,70 @@ object JetStream:
       * `A` is then read from the same bytes.
       */
     private def decode[A: JsonValueCodec](payload: Chunk[Byte]): F[A] =
-      F.delay(payload.toArray)
-        .flatMap { bytes =>
-          F.delay(readFromArray[ApiErrorEnvelope](bytes).error).flatMap {
+      F.delay {
+        try
+          readJson[ApiErrorEnvelope](payload).error match
             case Some(err) =>
-              F.raiseError[A](
-                NatsError
-                  .JetStreamApiError(err.code, err.errCode, err.description)
+              throw NatsError.JetStreamApiError(
+                err.code,
+                err.errCode,
+                err.description
               )
-            case None => F.delay(readFromArray[A](bytes))
-          }
-        }
-        .adaptError { case e: JsonReaderException =>
-          NatsError.ProtocolParseError(
-            s"JetStream response decode failed: ${e.getMessage}"
-          )
-        }
+            case None => readJson[A](payload)
+        catch
+          case e: JsonReaderException =>
+            throw NatsError.ProtocolParseError(
+              s"JetStream response decode failed: ${e.getMessage}"
+            )
+      }
+
+    /** Like [[decode]] for [[PubAck]], but single-pass: a publish reply carries
+      * the `error` envelope inline, so [[PubAckResponse]] reads both shapes at
+      * once. The sentinel check stands in for the required-field check that
+      * [[PubAck]]'s codec performs.
+      */
+    private def decodePubAck(payload: Chunk[Byte]): F[PubAck] =
+      F.delay {
+        try
+          val r = readJson[PubAckResponse](payload)
+          r.error match
+            case Some(err) =>
+              throw NatsError.JetStreamApiError(
+                err.code,
+                err.errCode,
+                err.description
+              )
+            case None =>
+              if r.stream == null || r.seq < 0 then
+                throw NatsError.ProtocolParseError(
+                  "JetStream response decode failed: incomplete pub ack"
+                )
+              else PubAck(r.stream, r.seq, r.duplicate, r.domain)
+        catch
+          case e: JsonReaderException =>
+            throw NatsError.ProtocolParseError(
+              s"JetStream response decode failed: ${e.getMessage}"
+            )
+      }
 
     /** Like [[decode]] but the success value lives under `message`. */
     private def decodeMessage(payload: Chunk[Byte]): F[StoredMessage] =
-      F.delay(payload.toArray)
-        .flatMap { bytes =>
-          F.delay(readFromArray[ApiErrorEnvelope](bytes).error).flatMap {
+      F.delay {
+        try
+          readJson[ApiErrorEnvelope](payload).error match
             case Some(err) =>
-              F.raiseError[StoredMessage](
-                NatsError
-                  .JetStreamApiError(err.code, err.errCode, err.description)
+              throw NatsError.JetStreamApiError(
+                err.code,
+                err.errCode,
+                err.description
               )
-            case None => F.delay(readFromArray[GetMsgResponse](bytes).message)
-          }
-        }
-        .adaptError { case e: JsonReaderException =>
-          NatsError.ProtocolParseError(
-            s"JetStream response decode failed: ${e.getMessage}"
-          )
-        }
+            case None => readJson[GetMsgResponse](payload).message
+        catch
+          case e: JsonReaderException =>
+            throw NatsError.ProtocolParseError(
+              s"JetStream response decode failed: ${e.getMessage}"
+            )
+      }
 
     /** Lazily page through an offset-paginated API list. */
     private def paginate[A](

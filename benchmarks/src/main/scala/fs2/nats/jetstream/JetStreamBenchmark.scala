@@ -19,6 +19,7 @@
 package fs2.nats.jetstream
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
+import fs2.Chunk
 import fs2.nats.jetstream.protocol.*
 import fs2.nats.protocol.Connect
 import org.openjdk.jmh.annotations.*
@@ -96,6 +97,33 @@ class JetStreamBenchmark:
   @Benchmark
   def decodePubAck(): PubAck =
     readFromArray[PubAck](pubAckJson)
+
+  // Publish-path reply decode, before/after #51: the old shape copied the
+  // payload out of the chunk and ran two full jsoniter passes (envelope probe,
+  // then the ack); the new shape reads the chunk's array in place in one pass.
+  // Compare `gc.alloc.rate.norm`, not ns/op.
+  private val pubAckChunk: Chunk[Byte] = Chunk.array(pubAckJson)
+
+  @Benchmark
+  @BenchmarkMode(Array(Mode.AverageTime))
+  @OutputTimeUnit(TimeUnit.NANOSECONDS)
+  def decodePubAckReplyTwoPassCopy(): PubAck =
+    val bytes = pubAckChunk.toArray
+    readFromArray[ApiErrorEnvelope](bytes).error match
+      case Some(e) => throw new RuntimeException(e.description)
+      case None    => readFromArray[PubAck](bytes)
+
+  @Benchmark
+  @BenchmarkMode(Array(Mode.AverageTime))
+  @OutputTimeUnit(TimeUnit.NANOSECONDS)
+  def decodePubAckReplySinglePassZeroCopy(): PubAckResponse =
+    pubAckChunk match
+      case s: Chunk.ArraySlice[?] =>
+        s.values match
+          case a: Array[Byte] =>
+            readFromSubArray[PubAckResponse](a, s.offset, s.offset + s.length)
+          case _ => readFromArray[PubAckResponse](pubAckChunk.toArray)
+      case _ => readFromArray[PubAckResponse](pubAckChunk.toArray)
 
   @Benchmark
   def decodeInfo(): fs2.nats.protocol.Info =
