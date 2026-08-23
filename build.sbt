@@ -157,6 +157,17 @@ lazy val root = project
       ProblemFilters.exclude[DirectMissingMethodProblem](
         "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.activeRef"
       ),
+      // perf #50: the per-subscription SubState moved from a Ref into an
+      // AtomicReference field on InternalSubscription, so the hot delivery path
+      // costs one volatile read instead of a second effect node.
+      // InternalSubscription and SubscriptionHandleImpl are object-private
+      // implementation classes emitted as public classfiles, not public API.
+      ProblemFilters.exclude[DirectMissingMethodProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#InternalSubscription.stateRef"
+      ),
+      ProblemFilters.exclude[IncompatibleMethTypeProblem](
+        "fs2.nats.subscriptions.SubscriptionManager#SubscriptionHandleImpl.this"
+      ),
       // JetStream P1: the request/reply primitive adds `request` to the
       // NatsClient trait and surfaces the status line code + description on
       // HMsgFrame and NatsMessage (new fields with defaults). These are

@@ -18,6 +18,7 @@ package fs2.nats.subscriptions
 
 import cats.effect.IO
 import cats.effect.kernel.Ref
+import cats.syntax.all.*
 import fs2.Chunk
 import munit.CatsEffectSuite
 import fs2.nats.client.SlowConsumerPolicy
@@ -193,6 +194,117 @@ class SubscriptionManagerSpec extends CatsEffectSuite:
         .map { result =>
           assertEquals(result, None)
         }
+    }
+  }
+
+  test("routes messages correctly with more than four subscriptions") {
+    // Eight subscriptions push the lookup structure past the Map1..Map4 /
+    // single-node-trie boundary, so this exercises real branching rather than
+    // a degenerate one-entry map.
+    createManager().flatMap { case (manager, _) =>
+      (1L to 8L).toList
+        .traverse(sid => manager.register(sid, s"subject.$sid", None))
+        .flatMap { registered =>
+          (1L to 8L).toList
+            .traverse_ { sid =>
+              manager.routeMessage(
+                NatsMessage.parserBuilder.msg(
+                  s"subject.$sid",
+                  sid,
+                  None,
+                  Chunk.array(s"payload-$sid".getBytes)
+                )
+              )
+            }
+            .flatMap { _ =>
+              registered.zip(1L to 8L).traverse_ { case ((stream, _), sid) =>
+                stream.take(1).compile.toList.map { messages =>
+                  assertEquals(messages.length, 1)
+                  assertEquals(messages.head.payloadAsString, s"payload-$sid")
+                  assertEquals(messages.head.subject, s"subject.$sid")
+                }
+              }
+            }
+        }
+    }
+  }
+
+  test("activeSubscriptions reports all registered subscriptions") {
+    createManager().flatMap { case (manager, _) =>
+      (1L to 8L).toList
+        .traverse_ { sid =>
+          val group = if sid % 2 == 0 then Some(s"group.$sid") else None
+          manager.register(sid, s"subject.$sid", group)
+        }
+        .flatMap { _ =>
+          manager.activeSubscriptions.map { active =>
+            // Asserted as a Set: the iteration order of the subscription map is
+            // not part of the contract, and its only consumer (SUB replay on
+            // reconnect) is order-insensitive.
+            assertEquals(active.map(_._1).toSet, (1L to 8L).toSet)
+            assertEquals(
+              active.map(t => (t._1, t._2)).toSet,
+              (1L to 8L).map(sid => (sid, s"subject.$sid")).toSet
+            )
+            assertEquals(
+              active.map(t => (t._1, t._3)).toSet,
+              (1L to 8L)
+                .map(sid =>
+                  (sid, if sid % 2 == 0 then Some(s"group.$sid") else None)
+                )
+                .toSet
+            )
+          }
+        }
+    }
+  }
+
+  test("ignores messages for negative and extreme sids") {
+    // The lookup keys off the raw sid, including its sign bit; a wire sid that
+    // was never registered must stay a silent drop.
+    createManager().flatMap { case (manager, _) =>
+      manager.register(1, "test", None).flatMap { _ =>
+        List(-1L, Long.MinValue, Long.MaxValue).traverse_ { sid =>
+          manager
+            .routeMessage(
+              NatsMessage.parserBuilder
+                .msg("test", sid, None, Chunk.array("orphan".getBytes))
+            )
+            .map(result => assertEquals(result, None))
+        }
+      }
+    }
+  }
+
+  test("unsubscribe after closeAll does not send a second UNSUB") {
+    // The handle and the manager share one state cell, so a release after the
+    // manager already tore the subscription down must be a no-op.
+    createManager().flatMap { case (manager, unsubsRef) =>
+      manager.register(1, "test", None).flatMap { result =>
+        val (_, handle) = result
+        manager.closeAll.flatMap { _ =>
+          handle.unsubscribe.flatMap { _ =>
+            unsubsRef.get.map { unsubs =>
+              assertEquals(unsubs, List.empty)
+            }
+          }
+        }
+      }
+    }
+  }
+
+  test("unsubscribe is idempotent") {
+    createManager().flatMap { case (manager, unsubsRef) =>
+      manager.register(1, "test", None).flatMap { result =>
+        val (_, handle) = result
+        handle.unsubscribe.flatMap { _ =>
+          handle.unsubscribe.flatMap { _ =>
+            unsubsRef.get.map { unsubs =>
+              assertEquals(unsubs, List((1L, None)))
+            }
+          }
+        }
+      }
     }
   }
 

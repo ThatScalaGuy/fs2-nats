@@ -24,6 +24,10 @@ import fs2.nats.client.{ClientEvent, SlowConsumerPolicy}
 import fs2.nats.protocol.Headers
 import fs2.nats.util.Queues
 
+import java.util.concurrent.atomic.AtomicReference
+
+import scala.collection.immutable.LongMap
+
 /** Handle for managing a subscription. Provides methods to unsubscribe and
   * configure message delivery.
   *
@@ -159,7 +163,15 @@ object SubscriptionManager:
       sidAllocator: SidAllocator[F],
       onUnsubscribe: (Long, Option[Int]) => F[Unit]
   ): F[SubscriptionManager[F]] =
-    for subsRef <- Ref.of[F, Map[Long, InternalSubscription[F]]](Map.empty)
+    // LongMap rather than Map[Long, _]: the lookup in `deliverMessage` runs once
+    // per received message. A generic Map boxes the primitive sid and its `get`
+    // is a megamorphic interface call in practice, because the receiver cycles
+    // through Map1..Map4 and the CHAMP HashMap as subscriptions come and go.
+    // LongMap.get(Long) is final on a sealed class, takes the raw primitive and
+    // stays monomorphic for the lifetime of the client. Every update must use
+    // `updated`/`removed`: the inherited `+`/`-` widen the static type back to
+    // Map[Long, _] and silently restore the boxed lookup.
+    for subsRef <- Ref.of[F, LongMap[InternalSubscription[F]]](LongMap.empty)
     yield new SubscriptionManagerImpl[F](
       subsRef,
       queueCapacity,
@@ -185,17 +197,36 @@ object SubscriptionManager:
       val sid: Long,
       val subject: String,
       val queueGroup: Option[String],
-      val queue: Queue[F, NatsMessage],
-      val stateRef: Ref[F, SubState]
-  )
+      val queue: Queue[F, NatsMessage]
+  ):
+    // Held as a plain AtomicReference rather than a Ref so that the common
+    // delivery path costs a single volatile read instead of a second effect
+    // node built at runtime inside the outer continuation. Reads and writes
+    // only ever happen while an effect is running -- inside a delay, or inside
+    // a flatMap continuation the runtime re-enters on every run -- so the
+    // mutation is not observable as a side effect through the pure API.
+    // AtomicReference, not @volatile var,
+    // because the counted-subscription path genuinely needs compare-and-set:
+    // a read-modify-write there could overwrite a concurrent `remove` and
+    // resurrect a dead subscription.
+    private val stateRef = new AtomicReference[SubState](new SubState(true, -1))
+    def state: SubState = stateRef.get()
+    def setState(s: SubState): Unit = stateRef.set(s)
+    def casState(expected: SubState, updated: SubState): Boolean =
+      stateRef.compareAndSet(expected, updated)
 
   private class SubscriptionManagerImpl[F[_]: Async](
-      subsRef: Ref[F, Map[Long, InternalSubscription[F]]],
+      subsRef: Ref[F, LongMap[InternalSubscription[F]]],
       queueCapacity: Int,
       policy: SlowConsumerPolicy,
       sidAllocator: SidAllocator[F],
       onUnsubscribe: (Long, Option[Int]) => F[Unit]
   ) extends SubscriptionManager[F]:
+
+    // `Async[F].pure(None)` allocates a fresh Pure node at every construction
+    // site on the delivery path. The node is immutable, so one shared instance
+    // is semantically identical and costs nothing per message.
+    private val noneF: F[Option[ClientEvent.SlowConsumer]] = Async[F].pure(None)
 
     override def register(
         sid: Long,
@@ -204,15 +235,13 @@ object SubscriptionManager:
     ): F[(Stream[F, NatsMessage], SubscriptionHandle[F])] =
       for
         queue <- Queues.bounded[F, NatsMessage](queueCapacity)
-        stateRef <- Ref.of[F, SubState](new SubState(true, -1))
         sub = new InternalSubscription[F](
           sid,
           subject,
           queueGroup,
-          queue,
-          stateRef
+          queue
         )
-        _ <- subsRef.update(_ + (sid -> sub))
+        _ <- subsRef.update(_.updated(sid, sub))
       yield
         val stream =
           Stream.fromQueueUnterminated(queue).takeWhile(_ ne PoisonPill)
@@ -220,7 +249,7 @@ object SubscriptionManager:
           sid,
           subject,
           queueGroup,
-          stateRef,
+          sub,
           onUnsubscribe,
           this
         )
@@ -238,34 +267,56 @@ object SubscriptionManager:
       subsRef.get.flatMap { subs =>
         subs.get(sid) match
           case None =>
-            Async[F].pure(None)
+            noneF
 
           case Some(sub) =>
-            sub.stateRef.get.flatMap { state =>
-              if !state.active then Async[F].pure(None)
-              else if state.remaining < 0 then
-                // Unlimited subscription (the common case): deliver with a single
-                // state read, no compare-and-set.
-                tryEnqueue(sub, msg)
-              else
-                sub.stateRef
-                  .modify { cur =>
-                    if !cur.active then (cur, false)
-                    else if cur.remaining > 0 then
-                      (new SubState(true, cur.remaining - 1), true)
-                    else (new SubState(false, 0), false)
-                  }
-                  .flatMap { shouldDeliver =>
-                    if !shouldDeliver then
-                      sub.stateRef.set(new SubState(false, 0)) *>
-                        sub.queue.offer(PoisonPill) *>
-                        sidAllocator.release(sid) *>
-                        subsRef.update(_ - sid) *>
-                        Async[F].pure(None)
-                    else tryEnqueue(sub, msg)
-                  }
-            }
+            // Read the state straight in the continuation, without wrapping it
+            // in `defer`. This body is the function passed to `flatMap`, which
+            // the runtime invokes on every run of the returned `F`, so the
+            // volatile read already happens at run time and a re-run observes
+            // fresh state. `defer` would only add a Delay plus a FlatMap node
+            // per delivered message on the path this exists to make cheap.
+            val state = sub.state
+            if !state.active then noneF
+            else if state.remaining < 0 then
+              // Unlimited subscription (the common case): deliver with a single
+              // state read, no compare-and-set.
+              tryEnqueue(sub, msg)
+            else deliverCounted(sub, sid, msg)
       }
+
+    private def deliverCounted(
+        sub: InternalSubscription[F],
+        sid: Long,
+        msg: NatsMessage
+    ): F[Option[ClientEvent.SlowConsumer]] =
+      // Counted (auto-unsubscribe) subscriptions only. The CAS loop reproduces
+      // the previous `Ref.modify` exactly: it re-reads `active` on every attempt
+      // so a concurrent `remove` wins, and hands out exactly one `false` verdict
+      // across racing deliveries, so the teardown below runs at most once.
+      //
+      // `claim()` runs eagerly, so this method must only ever be called from
+      // inside an effect continuation -- it has exactly one caller, the
+      // `subsRef.get.flatMap` body in `deliverMessage`, which the runtime
+      // re-enters on every run. Deferring here would just add a second
+      // redundant Delay/FlatMap pair inside that same continuation.
+      @annotation.tailrec
+      def claim(): Boolean =
+        val cur = sub.state
+        if !cur.active then false
+        else if cur.remaining > 0 then
+          if sub.casState(cur, new SubState(true, cur.remaining - 1)) then true
+          else claim()
+        else if sub.casState(cur, new SubState(false, 0)) then false
+        else claim()
+
+      if !claim() then
+        Async[F].delay(sub.setState(new SubState(false, 0))) *>
+          sub.queue.offer(PoisonPill) *>
+          sidAllocator.release(sid) *>
+          subsRef.update(_.removed(sid)) *>
+          noneF
+      else tryEnqueue(sub, msg)
 
     private def tryEnqueue(
         sub: InternalSubscription[F],
@@ -277,7 +328,7 @@ object SubscriptionManager:
 
         case SlowConsumerPolicy.DropNew =>
           sub.queue.tryOffer(msg).flatMap {
-            case true  => Async[F].pure(None)
+            case true  => noneF
             case false =>
               Async[F].pure(
                 Some(ClientEvent.SlowConsumer(sub.sid, sub.subject, 1))
@@ -286,7 +337,7 @@ object SubscriptionManager:
 
         case SlowConsumerPolicy.DropOldest =>
           sub.queue.tryOffer(msg).flatMap {
-            case true  => Async[F].pure(None)
+            case true  => noneF
             case false =>
               sub.queue.tryTake *>
                 sub.queue.tryOffer(msg) *>
@@ -297,7 +348,7 @@ object SubscriptionManager:
 
         case SlowConsumerPolicy.ErrorAndDrop =>
           sub.queue.tryOffer(msg).flatMap {
-            case true  => Async[F].pure(None)
+            case true  => noneF
             case false =>
               Async[F].pure(
                 Some(ClientEvent.SlowConsumer(sub.sid, sub.subject, 1))
@@ -306,14 +357,12 @@ object SubscriptionManager:
 
     override def activeSubscriptions: F[List[(Long, String, Option[String])]] =
       subsRef.get.flatMap { subs =>
-        subs.toList
-          .traverse { case (sid, sub) =>
-            sub.stateRef.get.map { state =>
-              if state.active then Some((sid, sub.subject, sub.queueGroup))
-              else None
-            }
+        Async[F].delay {
+          subs.toList.flatMap { case (sid, sub) =>
+            if sub.state.active then Some((sid, sub.subject, sub.queueGroup))
+            else None
           }
-          .map(_.flatten)
+        }
       }
 
     override def remove(sid: Long): F[Unit] =
@@ -321,33 +370,33 @@ object SubscriptionManager:
         subs.get(sid) match
           case None      => Async[F].unit
           case Some(sub) =>
-            sub.stateRef.set(new SubState(false, 0)) *>
+            Async[F].delay(sub.setState(new SubState(false, 0))) *>
               sub.queue.offer(PoisonPill) *>
               sidAllocator.release(sid) *>
-              subsRef.update(_ - sid)
+              subsRef.update(_.removed(sid))
       }
 
     override def closeAll: F[Unit] =
       subsRef.get.flatMap { subs =>
         subs.values.toList.traverse_ { sub =>
-          sub.stateRef.set(new SubState(false, 0)) *>
+          Async[F].delay(sub.setState(new SubState(false, 0))) *>
             sub.queue.offer(PoisonPill) *>
             sidAllocator.release(sub.sid)
         }
-      } *> subsRef.set(Map.empty)
+      } *> subsRef.set(LongMap.empty)
 
   private class SubscriptionHandleImpl[F[_]: Async](
       val sid: Long,
       val subject: String,
       val queueGroup: Option[String],
-      stateRef: Ref[F, SubState],
+      sub: InternalSubscription[F],
       onUnsubscribe: (Long, Option[Int]) => F[Unit],
       manager: SubscriptionManager[F]
   ) extends SubscriptionHandle[F]:
 
     override def unsubscribe: F[Unit] =
-      stateRef.get.flatMap { state =>
-        if state.active then
+      Async[F].defer {
+        if sub.state.active then
           onUnsubscribe(sid, None) *>
             manager.remove(sid)
         else Async[F].unit
