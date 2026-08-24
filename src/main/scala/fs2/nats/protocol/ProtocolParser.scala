@@ -620,9 +620,12 @@ object ProtocolParser:
               )
 
   /** Build an HMSG frame by splitting the already-buffered payload region into
-    * its header and body parts (each copied into a fresh immutable Chunk). The
-    * header/body split clamps like `Chunk.take`/`Chunk.drop` so odd
-    * `headerLen`/`totalLen` combinations behave exactly as before.
+    * its header and body parts. The header region is parsed in place out of the
+    * carry buffer — every string the parser returns is a fresh copy, so nothing
+    * aliases the reused buffer — and only the body is copied into a fresh
+    * immutable Chunk. The header/body split still clamps like
+    * `Chunk.take`/`Chunk.drop` so odd `headerLen`/`totalLen` combinations
+    * behave exactly as before.
     */
   private def buildHMsg[O >: NatsFrame <: Frame](
       st: ParserState,
@@ -635,13 +638,11 @@ object ProtocolParser:
       builder: MsgBuilder[O]
   ): Step[O] =
     val h = math.max(0, math.min(headerLen, totalLen))
-    val headerChunk =
-      Chunk.array(java.util.Arrays.copyOfRange(st.carry, pStart, pStart + h))
     val payloadChunk =
       Chunk.array(
         java.util.Arrays.copyOfRange(st.carry, pStart + h, pStart + totalLen)
       )
-    Headers.parseWithStatus(headerChunk) match
+    Headers.parseWithStatus(st.carry, pStart, pStart + h) match
       case Right((statusCode, statusDescription, headers)) =>
         Step.Emit(
           builder.hmsg(

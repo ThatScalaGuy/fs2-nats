@@ -227,3 +227,111 @@ class HeadersSpec extends CatsEffectSuite:
     val headers = Headers("X-Test" -> "  spaced  value  ")
     assertEquals(headers.get("X-Test"), Some("  spaced  value  "))
   }
+
+  private val V = "Invalid NATS headers: missing or invalid version line"
+  private def R(c: Option[Int], d: Option[String], h: Headers) =
+    Right((c, d, h))
+
+  // Pins every semantic of the header-block parser that a caller can observe,
+  // asserted on the whole `Either` so a rewrite cannot drift in the status
+  // tuple, the entry order or a single character of the error text. The odd
+  // rows are deliberate: a lone CR or LF does not terminate a line, everything
+  // after the first blank line is dropped, `trim` strips C0 controls but not
+  // NBSP, and the status split uses the wider `Character.isWhitespace` set.
+  test("parseWithStatus acceptance matrix") {
+    val cases: List[
+      (String, Either[String, (Option[Int], Option[String], Headers)])
+    ] =
+      List(
+        "" -> Left(V),
+        "NATS/1.0" -> R(None, None, Headers.empty),
+        "NATS/1.0\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.0\r\n\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.0 503\r\n\r\n" -> R(Some(503), None, Headers.empty),
+        "NATS/1.0 100 Idle Heartbeat\r\n\r\n" ->
+          R(Some(100), Some("Idle Heartbeat"), Headers.empty),
+        "NATS/1.0  100  Idle  Heartbeat \r\n\r\n" ->
+          R(Some(100), Some("Idle  Heartbeat"), Headers.empty),
+        "NATS/1.0 abc\r\n\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.0 -1\r\n\r\n" -> R(Some(-1), None, Headers.empty),
+        "NATS/1.0 0100\r\n\r\n" -> R(Some(100), None, Headers.empty),
+        "NATS/1.0 99999999999\r\n\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.0 abc def\r\n\r\n" -> R(None, Some("def"), Headers.empty),
+        "NATS/1.0 404 No Messages\r\n\r\n" ->
+          R(Some(404), Some("No Messages"), Headers.empty),
+        "NATS/1.0 100 \r\n\r\n" -> R(Some(100), None, Headers.empty),
+        "NATS/1.0X\r\n\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.00 200\r\n\r\n" -> R(Some(0), Some("200"), Headers.empty),
+        "nats/1.0\r\n\r\n" -> Left(V),
+        "NATS/1.0 \r\n\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.0\t100\r\n\r\n" -> R(Some(100), None, Headers.empty),
+        "NATS/1.0 100\u2003Idle\r\n\r\n" ->
+          R(Some(100), Some("Idle"), Headers.empty),
+        "NATS/1.0 \u2003100 Idle\r\n\r\n" ->
+          R(None, Some("100 Idle"), Headers.empty),
+        "NATS/1.0\rA: b\r\n\r\n" -> R(None, Some("b"), Headers.empty),
+        "NATS/1.0\nA: b\r\n\r\n" -> R(None, Some("b"), Headers.empty),
+        "NATS/1.0\r\nA: b\r\n\r\nC: d\r\n\r\n" ->
+          R(None, None, Headers("A" -> "b")),
+        "NATS/1.0\r\n\r\nA: b\r\n\r\n" -> R(None, None, Headers.empty),
+        "NATS/1.0\r\nA: b" -> R(None, None, Headers("A" -> "b")),
+        "NATS/1.0\r\nBad1\r\nOk: 1\r\nBad2\r\n\r\n" -> Left(
+          "Invalid header line (no colon): Bad1; " +
+            "Invalid header line (no colon): Bad2"
+        ),
+        "NATS/1.0\r\n \r\n\r\n" -> Left("Invalid header line (no colon):  "),
+        "NATS/1.0\r\n: v\r\n\r\n" -> R(None, None, Headers("" -> "v")),
+        "NATS/1.0\r\na: b: c\r\n\r\n" -> R(None, None, Headers("a" -> "b: c")),
+        "NATS/1.0\r\na:    \r\n\r\n" -> R(None, None, Headers("a" -> "")),
+        "NATS/1.0\r\n  a  :  b  \r\n\r\n" -> R(None, None, Headers("a" -> "b")),
+        "NATS/1.0\r\nA: b\r\nA: c\r\n\r\n" ->
+          R(None, None, Headers("A" -> "b", "A" -> "c")),
+        "NATS/1.0\r\nA: b\nc\r\n\r\n" -> R(None, None, Headers("A" -> "b\nc")),
+        "NATS/1.0\r\nA: b\r\r\n\r\n" -> R(None, None, Headers("A" -> "b")),
+        "NATS/1.0\r\nKéy: välüe\r\n\r\n" ->
+          R(None, None, Headers("Kéy" -> "välüe")),
+        "NATS/1.0\r\nA: \u00a0b\u00a0\r\n\r\n" ->
+          R(None, None, Headers("A" -> "\u00a0b\u00a0")),
+        "NATS/1.0\r\nA: \u0001b\u0001\r\n\r\n" ->
+          R(None, None, Headers("A" -> "b"))
+      )
+    cases.foreach { case (in, expected) =>
+      assertEquals(Headers.parseWithStatus(in), expected, in)
+      assertEquals(Headers.parse(in), expected.map(_._3), in)
+    }
+  }
+
+  test("parse decodes malformed UTF-8 to the replacement character") {
+    // "NATS/1.0\r\nA: <C3>\r\n\r\n" - a truncated 2-byte lead.
+    val raw = Array[Byte](
+      0x4e,
+      0x41,
+      0x54,
+      0x53,
+      0x2f,
+      0x31,
+      0x2e,
+      0x30,
+      0x0d,
+      0x0a,
+      0x41,
+      0x3a,
+      0x20,
+      0xc3.toByte,
+      0x0d,
+      0x0a,
+      0x0d,
+      0x0a
+    )
+    assertEquals(
+      Headers.parse(Chunk.array(raw)),
+      Right(Headers("A" -> "\ufffd"))
+    )
+  }
+
+  test("parse reads a non-zero-offset Chunk slice") {
+    val pad = "xxxx".getBytes(StandardCharsets.UTF_8)
+    val body = "NATS/1.0\r\nA: b\r\n\r\n".getBytes(StandardCharsets.UTF_8)
+    val c = Chunk.array(pad ++ body).drop(pad.length)
+    assertEquals(Headers.parse(c), Right(Headers("A" -> "b")))
+  }
