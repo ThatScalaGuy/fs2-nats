@@ -510,6 +510,43 @@ class ProtocolParserSpec extends CatsEffectSuite:
       }
   }
 
+  /** The `Int` boundary of the declared payload length flips which error the
+    * parser reports, so both sides of it are pinned here rather than in the A/B
+    * property gate: `ReferenceProtocolParser` computes `length + 2` in `Int`,
+    * which overflows to a negative at `Int.MaxValue` and makes it report a
+    * different (CRLF) message than the current parser — a pre-existing
+    * divergence unrelated to the byte-level MSG path.
+    */
+  test("MSG length at the Int boundary picks the right error") {
+    val config = ParserConfig(strictMode = true)
+
+    def err(data: String): IO[String] =
+      Stream
+        .emit(toBytes(data))
+        .unchunks
+        .through(ProtocolParser.parseStream[IO](config))
+        .compile
+        .toList
+        .attempt
+        .map {
+          case Left(e)  => e.getMessage
+          case Right(_) => fail("Expected parse error")
+        }
+
+    for
+      inRange <- err("MSG a 1 2147483647\r\n")
+      overflow <- err("MSG a 1 2147483648\r\n")
+    yield
+      assertEquals(
+        inRange,
+        "Protocol parse error: Unexpected end of stream while reading payload (expected 2147483647 bytes)"
+      )
+      assertEquals(
+        overflow,
+        "Protocol parse error: Invalid MSG frame: MSG a 1 2147483648"
+      )
+  }
+
   test("fail on payload size exceeding limit") {
     val config = ParserConfig(maxPayloadLimit = Some(100), strictMode = true)
     val data = "MSG FOO 1 1000\r\n" + ("x" * 1000) + "\r\n"

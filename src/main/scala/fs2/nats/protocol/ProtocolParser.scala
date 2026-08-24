@@ -75,6 +75,13 @@ object ProtocolParser:
     */
   private val MaxArray: Int = Int.MaxValue - 8
 
+  /** Longest argument list a data control line can have:
+    * `HMSG <subject> <sid> <reply> <headerLen> <totalLen>` = 5 arguments after
+    * the command. A line with more arguments is malformed by definition and is
+    * handed to the tokenizing path.
+    */
+  private val MaxArgs: Int = 5
+
   /** Mutable parse carry, confined to a single fiber. `[start, end)` is the
     * live (not-yet-parsed) window into `carry`; bytes before `start` are
     * consumed and bytes at/after `end` are garbage.
@@ -83,6 +90,16 @@ object ProtocolParser:
     var carry: Array[Byte] = new Array[Byte](initialCapacity)
     var start: Int = 0
     var end: Int = 0
+
+    /** Scratch bounds for the MSG/HMSG fast path: argument `i` of the current
+      * control line occupies `[argStart(i), argEnd(i))` in `carry`. Reused per
+      * frame so the hot path allocates nothing to hold its token layout; only
+      * ever written and read within a single `parseOne` call, never across a
+      * `NeedMorePayload` round trip (the carry may be compacted in between,
+      * which would invalidate the absolute offsets).
+      */
+    val argStart: Array[Int] = new Array[Int](MaxArgs)
+    val argEnd: Array[Int] = new Array[Int](MaxArgs)
 
   /** Outcome of attempting to parse one frame from the current carry window.
     * `A` is the emitted element type (control frames are `NatsFrame`; data
@@ -294,52 +311,59 @@ object ProtocolParser:
             s"Control line exceeds maximum length of ${config.maxControlLineLength}"
           )
         else
-          val tokens = tokenize(st.carry, start, crIdx)
-          tokens.headOption.map(_.toUpperCase) match
-            case None =>
-              // Blank control line: skip past it and keep scanning.
-              st.start = crIdx + 2
+          // Fast path first: a canonical MSG/HMSG line never builds a token
+          // vector. It declines (null) for anything non-canonical, and the
+          // tokenizing path below then decides — so every odd input keeps its
+          // exact historical behaviour, error text included.
+          val fast = fastDataFrame(config, st, start, crIdx, builder)
+          if fast != null then result = fast
+          else
+            val tokens = tokenize(st.carry, start, crIdx)
+            tokens.headOption.map(_.toUpperCase) match
+              case None =>
+                // Blank control line: skip past it and keep scanning.
+                st.start = crIdx + 2
 
-            case Some("INFO") =>
-              val jsonStr = decodeLine(st.carry, start, crIdx).drop(5).trim
-              Try(readFromString[Info](jsonStr)) match
-                case Success(info) =>
-                  st.start = crIdx + 2
-                  result = Step.Emit(NatsFrame.InfoFrame(info))
-                case Failure(err) =>
-                  result = Step.FailSoft(
-                    s"Failed to parse INFO JSON: ${err.getMessage}"
-                  )
+              case Some("INFO") =>
+                val jsonStr = decodeLine(st.carry, start, crIdx).drop(5).trim
+                Try(readFromString[Info](jsonStr)) match
+                  case Success(info) =>
+                    st.start = crIdx + 2
+                    result = Step.Emit(NatsFrame.InfoFrame(info))
+                  case Failure(err) =>
+                    result = Step.FailSoft(
+                      s"Failed to parse INFO JSON: ${err.getMessage}"
+                    )
 
-            case Some("MSG") =>
-              result = handleMsg(config, st, tokens, crIdx, builder)
+              case Some("MSG") =>
+                result = handleMsg(config, st, tokens, crIdx, builder)
 
-            case Some("HMSG") =>
-              result = handleHMsg(config, st, tokens, crIdx, builder)
+              case Some("HMSG") =>
+                result = handleHMsg(config, st, tokens, crIdx, builder)
 
-            case Some("PING") =>
-              st.start = crIdx + 2
-              result = Step.Emit(NatsFrame.PingFrame)
+              case Some("PING") =>
+                st.start = crIdx + 2
+                result = Step.Emit(NatsFrame.PingFrame)
 
-            case Some("PONG") =>
-              st.start = crIdx + 2
-              result = Step.Emit(NatsFrame.PongFrame)
+              case Some("PONG") =>
+                st.start = crIdx + 2
+                result = Step.Emit(NatsFrame.PongFrame)
 
-            case Some("+OK") =>
-              st.start = crIdx + 2
-              result = Step.Emit(NatsFrame.OkFrame)
+              case Some("+OK") =>
+                st.start = crIdx + 2
+                result = Step.Emit(NatsFrame.OkFrame)
 
-            case Some("-ERR") =>
-              val msg = decodeLine(st.carry, start, crIdx)
-                .drop(4)
-                .trim
-                .stripPrefix("'")
-                .stripSuffix("'")
-              st.start = crIdx + 2
-              result = Step.Emit(NatsFrame.ErrFrame(msg))
+              case Some("-ERR") =>
+                val msg = decodeLine(st.carry, start, crIdx)
+                  .drop(4)
+                  .trim
+                  .stripPrefix("'")
+                  .stripSuffix("'")
+                st.start = crIdx + 2
+                result = Step.Emit(NatsFrame.ErrFrame(msg))
 
-            case Some(cmd) =>
-              result = Step.FailSoft(s"Unrecognized command: $cmd")
+              case Some(cmd) =>
+                result = Step.FailSoft(s"Unrecognized command: $cmd")
     result
 
   private def handleMsg[O >: NatsFrame <: Frame](
@@ -475,6 +499,126 @@ object ProtocolParser:
       case _ =>
         Step.FailSoft(s"Invalid HMSG frame format: ${tokens.mkString(" ")}")
 
+  /** Byte-level fast path for the two data commands.
+    *
+    * Parses a canonical `MSG`/`HMSG` control line straight out of the carry: no
+    * token vector, no command String, no boxed sid/length, no builder closure.
+    * Per-message garbage drops to the subject String, the optional reply
+    * String, the payload copy plus its `Chunk`, and the emitted frame.
+    *
+    * Returns `null` whenever the line is anything other than plainly canonical
+    * — a lower-case or padded command, a wrong arity, a signed, oversized or
+    * non-ASCII number. `parseOne` then runs the original tokenizing path, which
+    * stays the sole authority on malformed input and on the exact
+    * `Invalid MSG frame: …` / `Unrecognized command: …` text. Declining is
+    * side-effect free: only the scratch bounds are written, never `st.start`.
+    */
+  private def fastDataFrame[O >: NatsFrame <: Frame](
+      config: ParserConfig,
+      st: ParserState,
+      start: Int,
+      crIdx: Int,
+      builder: MsgBuilder[O]
+  ): Step[O] =
+    val c = st.carry
+    val len = crIdx - start
+    // The command must be the literal upper-case token followed by a
+    // separator: `handleMsg`/`handleHMsg` match `Vector("MSG", …)`
+    // case-sensitively, and `msg`, ` MSG`, `MSGX` must keep reaching the
+    // tokenizing path to get their historical (and differing) outcomes.
+    val isMsg =
+      len > 3 && c(start) == 'M'.toByte && c(start + 1) == 'S'.toByte &&
+        c(start + 2) == 'G'.toByte && isSpace(c(start + 3))
+    val isHMsg =
+      len > 4 && c(start) == 'H'.toByte && c(start + 1) == 'M'.toByte &&
+        c(start + 2) == 'S'.toByte && c(start + 3) == 'G'.toByte &&
+        isSpace(c(start + 4))
+    if isMsg then
+      fastMsg(config, st, scanArgs(st, start + 4, crIdx), crIdx, builder)
+    else if isHMsg then
+      fastHMsg(config, st, scanArgs(st, start + 5, crIdx), crIdx, builder)
+    else null
+
+  /** `MSG <subject> <sid> [<reply>] <length>` — the fast twin of `handleMsg`'s
+    * two `Vector` arities. `n` is the argument count from `scanArgs`.
+    */
+  private def fastMsg[O >: NatsFrame <: Frame](
+      config: ParserConfig,
+      st: ParserState,
+      n: Int,
+      crIdx: Int,
+      builder: MsgBuilder[O]
+  ): Step[O] =
+    if n != 3 && n != 4 then null
+    else
+      val hasReply = n == 4
+      val lenIdx = if hasReply then 3 else 2
+      val sid = scanDigits(st.carry, st.argStart(1), st.argEnd(1))
+      val length = scanDigits(st.carry, st.argStart(lenIdx), st.argEnd(lenIdx))
+      if sid < 0 || length < 0 || length > Int.MaxValue then null
+      else
+        validatePayloadLength(config, length) match
+          case Some(errMsg) => Step.FailSoft(errMsg)
+          case None         =>
+            val n32 = length.toInt
+            val pending = consumePayload(config, st, crIdx, n32)
+            if pending != null then pending
+            else
+              val pStart = crIdx + 2
+              Step.Emit(
+                builder.msg(
+                  arg(st, 0),
+                  sid,
+                  if hasReply then Some(arg(st, 2)) else None,
+                  Chunk.array(
+                    java.util.Arrays
+                      .copyOfRange(st.carry, pStart, pStart + n32)
+                  )
+                )
+              )
+
+  /** `HMSG <subject> <sid> [<reply>] <headerLen> <totalLen>` — the fast twin of
+    * `handleHMsg`. Header/body splitting and header parsing are delegated
+    * unchanged to `buildHMsg`, so the `max(0, min(headerLen, totalLen))` clamp
+    * and the header error text are shared with the tokenizing path.
+    */
+  private def fastHMsg[O >: NatsFrame <: Frame](
+      config: ParserConfig,
+      st: ParserState,
+      n: Int,
+      crIdx: Int,
+      builder: MsgBuilder[O]
+  ): Step[O] =
+    if n != 4 && n != 5 then null
+    else
+      val hasReply = n == 5
+      val hIdx = if hasReply then 3 else 2
+      val sid = scanDigits(st.carry, st.argStart(1), st.argEnd(1))
+      val headerLen = scanDigits(st.carry, st.argStart(hIdx), st.argEnd(hIdx))
+      val totalLen =
+        scanDigits(st.carry, st.argStart(hIdx + 1), st.argEnd(hIdx + 1))
+      if sid < 0 || headerLen < 0 || headerLen > Int.MaxValue ||
+        totalLen < 0 || totalLen > Int.MaxValue
+      then null
+      else
+        validatePayloadLength(config, totalLen) match
+          case Some(errMsg) => Step.FailSoft(errMsg)
+          case None         =>
+            val total32 = totalLen.toInt
+            val pending = consumePayload(config, st, crIdx, total32)
+            if pending != null then pending
+            else
+              buildHMsg(
+                st,
+                arg(st, 0),
+                sid,
+                if hasReply then Some(arg(st, 2)) else None,
+                headerLen.toInt,
+                total32,
+                crIdx + 2,
+                builder
+              )
+
   /** Build an HMSG frame by splitting the already-buffered payload region into
     * its header and body parts (each copied into a fresh immutable Chunk). The
     * header/body split clamps like `Chunk.take`/`Chunk.drop` so odd
@@ -514,17 +658,20 @@ object ProtocolParser:
         Step.FailSoft(s"Failed to parse HMSG headers: $err")
 
   /** Check whether a `length`-byte payload (plus its trailing CRLF) is fully
-    * buffered after the control-line CRLF at `crIdx`. If so, verify the CRLF,
-    * advance `st.start` past the payload, and delegate frame construction to
-    * `build(payloadStart, payloadEnd)`. Otherwise signal `NeedMorePayload`.
+    * buffered after the control-line CRLF at `crIdx`. On success verify the
+    * CRLF, advance `st.start` past payload and CRLF, and return `null` — the
+    * caller then builds the frame from `[crIdx + 2, crIdx + 2 + length)`.
+    * Otherwise return the terminal `Step` to hand back to `go`.
+    *
+    * Returning `null` rather than taking a builder function keeps the MSG/HMSG
+    * fast path free of a `Function2` allocation and its boxed `Int` arguments.
     */
-  private def readPayload[O >: NatsFrame <: Frame](
+  private def consumePayload(
       config: ParserConfig,
       st: ParserState,
       crIdx: Int,
-      length: Int,
-      build: (Int, Int) => Step[O]
-  ): Step[O] =
+      length: Int
+  ): Step[Nothing] =
     val payloadStart = crIdx + 2
     val needed = length.toLong + 2L
     if (st.end - payloadStart).toLong >= needed then
@@ -533,15 +680,29 @@ object ProtocolParser:
       val crlfB = st.carry(payloadEnd + 1)
       if crlfA == CR && crlfB == LF then
         st.start = payloadEnd + 2
-        build(payloadStart, payloadEnd)
+        null
       else if config.strictCRLF then
         Step.FailHard(
           s"Missing CRLF after payload (got 0x${String.format("%02x", crlfA)} 0x${String.format("%02x", crlfB)})"
         )
       else
         st.start = payloadEnd + 2
-        build(payloadStart, payloadEnd)
+        null
     else Step.NeedMorePayload(length)
+
+  /** As `consumePayload`, delegating frame construction to
+    * `build(payloadStart, payloadEnd)`. Used by the tokenizing MSG/HMSG path.
+    */
+  private def readPayload[O >: NatsFrame <: Frame](
+      config: ParserConfig,
+      st: ParserState,
+      crIdx: Int,
+      length: Int,
+      build: (Int, Int) => Step[O]
+  ): Step[O] =
+    val pending = consumePayload(config, st, crIdx, length)
+    if pending != null then pending
+    else build(crIdx + 2, crIdx + 2 + length)
 
   /** Validate a declared payload length against config limits. Returns the
     * error message to fail with, or `None` if the length is acceptable.
@@ -609,6 +770,67 @@ object ProtocolParser:
           StandardCharsets.UTF_8
         )
     builder.result()
+
+  /** Split the argument region `[from, until)` of the current control line into
+    * the state's scratch bounds, using the same separator rule as `tokenize`
+    * (space/tab, runs collapsed, leading and trailing separators skipped, no
+    * empty tokens). Returns the argument count, or `-1` if the line carries
+    * more arguments than any data frame can take — such a line is malformed and
+    * is left to the tokenizing path.
+    */
+  private def scanArgs(st: ParserState, from: Int, until: Int): Int =
+    val c = st.carry
+    var i = from
+    var n = 0
+    while i < until do
+      while i < until && isSpace(c(i)) do i += 1
+      if i < until then
+        if n == MaxArgs then return -1
+        st.argStart(n) = i
+        while i < until && !isSpace(c(i)) do i += 1
+        st.argEnd(n) = i
+        n += 1
+    n
+
+  /** Longest digit run the fast scanner will accept. Capped so that
+    * `acc * 10 + d` can never overflow: 18 digits bound the result by 10^18 -
+    * 1, well below `Long.MaxValue`.
+    */
+  private val MaxFastDigits: Int = 18
+
+  /** Parse `[from, until)` as a plain unsigned ASCII decimal number.
+    *
+    * Returns `-1` for anything the fast path must not guess at — a `+`/`-`
+    * sign, a non-ASCII digit (`Long.parseLong` accepts Arabic-Indic and other
+    * Unicode digits via `Character.digit`), an empty token, or more digits than
+    * `MaxFastDigits`. The caller then falls back to the tokenizing path, where
+    * `Long.parseLong`/`Integer.parseInt` remain the sole authority on signs,
+    * overflow boundaries and exotic digit forms. A successfully scanned value
+    * is always `>= 0`, so `-1` is an unambiguous sentinel.
+    */
+  private def scanDigits(carry: Array[Byte], from: Int, until: Int): Long =
+    val len = until - from
+    if len < 1 || len > MaxFastDigits then -1L
+    else
+      var i = from
+      var acc = 0L
+      while i < until do
+        val d = carry(i) - '0'.toByte
+        if d < 0 || d > 9 then return -1L
+        acc = acc * 10L + d
+        i += 1
+      acc
+
+  /** Decode scratch argument `i` of the current control line, with the exact
+    * decoding `tokenize` would have used.
+    */
+  private def arg(st: ParserState, i: Int): String =
+    new String(
+      st.carry,
+      st.argStart(i),
+      st.argEnd(i) - st.argStart(i),
+      StandardCharsets.UTF_8
+    )
 
   private def parseInt(s: String): Option[Int] =
     try Some(s.toInt)
