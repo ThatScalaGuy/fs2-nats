@@ -57,24 +57,24 @@ hidden threads, no surprises. 🎉
 
 ## 📦 Installation
 
-> **Latest release: `0.3.1`** — published to Maven Central for Scala 3.
+> **Latest release: `0.4.0`** — published to Maven Central for Scala 3.
 
 **sbt**
 
 ```scala
-libraryDependencies += "de.thatscalaguy" %% "fs2-nats" % "0.3.1"
+libraryDependencies += "de.thatscalaguy" %% "fs2-nats" % "0.4.0"
 ```
 
 **Mill**
 
 ```scala
-ivy"de.thatscalaguy::fs2-nats:0.3.1"
+ivy"de.thatscalaguy::fs2-nats:0.4.0"
 ```
 
 **scala-cli**
 
 ```scala
-//> using dep de.thatscalaguy::fs2-nats:0.3.1
+//> using dep de.thatscalaguy::fs2-nats:0.4.0
 ```
 
 ## 🚀 Quick Start

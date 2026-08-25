@@ -46,19 +46,19 @@ requires NATS Server **2.9+**.
 **sbt**
 
 ```scala
-libraryDependencies += "de.thatscalaguy" %% "fs2-nats" % "0.2.0"
+libraryDependencies += "de.thatscalaguy" %% "fs2-nats" % "0.4.0"
 ```
 
 **Mill**
 
 ```scala
-ivy"de.thatscalaguy::fs2-nats:0.2.0"
+ivy"de.thatscalaguy::fs2-nats:0.4.0"
 ```
 
 **scala-cli**
 
 ```scala
-//> using dep de.thatscalaguy::fs2-nats:0.2.0
+//> using dep de.thatscalaguy::fs2-nats:0.4.0
 ```
 
 ## Hello, NATS
