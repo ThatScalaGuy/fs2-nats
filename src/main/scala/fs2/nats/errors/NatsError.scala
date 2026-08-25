@@ -256,3 +256,13 @@ object NatsError:
     */
   final case class ObjectAlreadyExists(name: String)
       extends NatsError(s"Object '$name' already exists")
+
+  /** A micro reply (or payload) failed to decode via its Payload codec.
+    *
+    * @param subject
+    *   The subject the payload was received on
+    * @param detail
+    *   The codec's failure message
+    */
+  final case class PayloadDecodeError(subject: String, detail: String)
+      extends NatsError(s"Failed to decode payload on '$subject': $detail")
