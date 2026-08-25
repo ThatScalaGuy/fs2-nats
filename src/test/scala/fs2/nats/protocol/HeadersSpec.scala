@@ -86,6 +86,16 @@ class HeadersSpec extends CatsEffectSuite:
     assert(str.endsWith("\r\n\r\n"))
   }
 
+  test("toBytes falls back to UTF-8 encoding for non-ASCII entries") {
+    val headers = Headers("X-Name" -> "Grüße", "X-City" -> "München")
+    val bytes = headers.toBytes
+    assertEquals(
+      new String(bytes.toArray, StandardCharsets.UTF_8),
+      "NATS/1.0\r\nX-Name: Grüße\r\nX-City: München\r\n\r\n"
+    )
+    assertEquals(headers.byteLength, bytes.size)
+  }
+
   test("empty headers toBytes returns empty chunk") {
     assertEquals(Headers.empty.toBytes, Chunk.empty)
   }

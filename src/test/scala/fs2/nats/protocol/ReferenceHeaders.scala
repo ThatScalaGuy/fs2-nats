@@ -16,10 +16,14 @@
 
 package fs2.nats.protocol
 
-/** Frozen, verbatim copy of the `split("\r\n", -1)` implementation of
-  * `Headers.parse` / `Headers.parseWithStatus`, as it stood before the
-  * index-scan rewrite. Used ONLY as the A/B correctness oracle for
-  * [[HeadersPropSpec]].
+import fs2.Chunk
+import java.nio.charset.StandardCharsets
+
+/** Frozen, verbatim copies of the previous implementations of `Headers`, in
+  * both directions: the `split("\r\n", -1)` parser as it stood before the
+  * index-scan rewrite, and the `StringBuilder` + `getBytes(UTF_8)` serializer
+  * as it stood before the write-into-a-sized-array rewrite. Used ONLY as the
+  * A/B correctness oracle for [[HeadersPropSpec]].
   *
   * This is needed because [[ReferenceProtocolParser]] delegates to the *live*
   * `Headers.parseWithStatus`: rewriting `Headers` moves both sides of the
@@ -29,6 +33,24 @@ package fs2.nats.protocol
 object ReferenceHeaders:
 
   private val Version: String = "NATS/1.0"
+
+  /** Frozen, verbatim copy of the `StringBuilder` + `getBytes(UTF_8)`
+    * implementation of `Headers.toBytes`.
+    */
+  def toBytes(entries: Vector[(String, String)]): Chunk[Byte] =
+    if entries.isEmpty then Chunk.empty
+    else
+      val sb = new StringBuilder
+      sb.append(Version)
+      sb.append("\r\n")
+      entries.foreach { case (k, v) =>
+        sb.append(k)
+        sb.append(": ")
+        sb.append(v)
+        sb.append("\r\n")
+      }
+      sb.append("\r\n")
+      Chunk.array(sb.toString.getBytes(StandardCharsets.UTF_8))
 
   def parse(str: String): Either[String, Headers] =
     val lines = str.split("\r\n", -1).toVector

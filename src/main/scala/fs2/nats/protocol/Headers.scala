@@ -124,32 +124,86 @@ final case class Headers(entries: Vector[(String, String)]):
 
   /** Serialize headers to NATS/1.0 format bytes.
     *
+    * Every protocol-defined header name and value is ASCII, and for ASCII
+    * `String.length` is already the UTF-8 byte count — so the block is measured
+    * once and then written straight into the array that is returned. The
+    * `StringBuilder` route this replaces materialized it three times over: the
+    * builder's own array (regrown twice on a typical block), the `String` that
+    * `toString` copies out of it, and a third copy from `getBytes`, which on a
+    * latin1-compact String is an `Arrays.copyOf` — the JDK never hands out the
+    * String's own array.
+    *
+    * `asciiSize` runs to completion before anything is allocated, so a
+    * non-ASCII key or value falls back to the encoder rather than narrowing a
+    * multi-byte char into an array sized as if it were one byte.
+    *
     * @return
     *   Chunk of bytes in NATS header format
     */
   def toBytes: Chunk[Byte] =
     if entries.isEmpty then Chunk.empty
     else
-      val sb = new StringBuilder
-      sb.append(Headers.Version)
-      sb.append(Headers.CRLF)
-      entries.foreach { case (k, v) =>
-        sb.append(k)
-        sb.append(": ")
-        sb.append(v)
-        sb.append(Headers.CRLF)
-      }
-      sb.append(Headers.CRLF)
-      Chunk.array(sb.toString.getBytes(StandardCharsets.UTF_8))
+      val size = asciiSize
+      if size < 0 then Headers.encodeUtf8(entries)
+      else
+        val arr = new Array[Byte](size)
+        System.arraycopy(
+          Headers.VersionLine,
+          0,
+          arr,
+          0,
+          Headers.VersionLine.length
+        )
+        var off = Headers.VersionLine.length
+        var i = 0
+        val n = entries.size
+        while i < n do
+          val e = entries(i)
+          off = Headers.putAscii(arr, off, e._1)
+          arr(off) = Headers.Colon
+          arr(off + 1) = Headers.Space
+          off = Headers.putAscii(arr, off + 2, e._2)
+          arr(off) = Headers.Cr
+          arr(off + 1) = Headers.Lf
+          off += 2
+          i += 1
+        arr(off) = Headers.Cr
+        arr(off + 1) = Headers.Lf
+        Chunk.array(arr)
 
   /** Get the serialized byte length of these headers.
+    *
+    * Counts the block instead of building it. Nothing in the client calls this
+    * — `Publisher` reads `.size` off the `Chunk` it is about to send anyway —
+    * so serializing a whole block to read one Int was pure waste. The ASCII
+    * branch is the same arithmetic `toBytes` sizes its array with, so the two
+    * cannot drift; only a non-ASCII block still has to ask the encoder.
     *
     * @return
     *   The byte length when serialized
     */
   def byteLength: Int =
     if entries.isEmpty then 0
-    else toBytes.size
+    else
+      val size = asciiSize
+      // Straight to the encoder, not via `toBytes`, which would re-run the
+      // scan that already answered `-1`.
+      if size < 0 then Headers.encodeUtf8(entries).size else size
+
+  /** Exact serialized size when every key and value is ASCII, `-1` when one is
+    * not — in that case only the UTF-8 encoder knows the answer.
+    */
+  private def asciiSize: Int =
+    var size = Headers.VersionLine.length + 2
+    var i = 0
+    val n = entries.size
+    while i < n && size >= 0 do
+      val e = entries(i)
+      if Headers.isAscii(e._1) && Headers.isAscii(e._2) then
+        size += e._1.length + 2 + e._2.length + 2
+      else size = -1
+      i += 1
+    size
 
 object Headers:
   /** NATS header version string */
@@ -160,6 +214,54 @@ object Headers:
 
   /** Empty headers instance */
   val empty: Headers = Headers(Vector.empty)
+
+  private val VersionLine: Array[Byte] =
+    (Version + CRLF).getBytes(StandardCharsets.US_ASCII)
+  private val Colon: Byte = ':'.toByte
+  private val Space: Byte = ' '.toByte
+  private val Cr: Byte = '\r'.toByte
+  private val Lf: Byte = '\n'.toByte
+
+  /** A `null` counts as non-ASCII so it takes the `StringBuilder` fallback,
+    * which appends the four chars `null` — nothing in the client can produce a
+    * null key or value, but that is what serializing one did before and this
+    * rewrite is not the place to change it.
+    */
+  private def isAscii(s: String): Boolean =
+    (s ne null) && {
+      var i = 0
+      val n = s.length
+      while i < n && s.charAt(i) <= 0x7f do i += 1
+      i == n
+    }
+
+  /** Narrowing a char to a byte is exact only for `<= 0x7f`; callers must have
+    * run `isAscii` first.
+    */
+  private def putAscii(arr: Array[Byte], off: Int, s: String): Int =
+    var i = 0
+    val n = s.length
+    while i < n do
+      arr(off + i) = s.charAt(i).toByte
+      i += 1
+    off + n
+
+  /** The pre-rewrite path, kept verbatim for blocks with a non-ASCII key or
+    * value: `getBytes` maps an unpaired surrogate to a single `'?'`, and
+    * reproducing that by hand is more semantics than a path this cold is worth.
+    */
+  private def encodeUtf8(entries: Vector[(String, String)]): Chunk[Byte] =
+    val sb = new StringBuilder
+    sb.append(Version)
+    sb.append(CRLF)
+    entries.foreach { case (k, v) =>
+      sb.append(k)
+      sb.append(": ")
+      sb.append(v)
+      sb.append(CRLF)
+    }
+    sb.append(CRLF)
+    Chunk.array(sb.toString.getBytes(StandardCharsets.UTF_8))
 
   /** Create Headers from varargs of key-value pairs.
     *

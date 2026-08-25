@@ -322,15 +322,29 @@ object JetStream:
         headers: Headers,
         opts: PublishOptions
     ): Headers =
-      List(
-        opts.msgId.map(JsHeaders.MsgId -> _),
-        opts.expectedStream.map(JsHeaders.ExpectedStream -> _),
-        opts.expectedLastSeq.map(v => JsHeaders.ExpectedLastSeq -> v.toString),
-        opts.expectedLastSubjectSeq.map(v =>
-          JsHeaders.ExpectedLastSubjectSeq -> v.toString
-        ),
-        opts.expectedLastMsgId.map(JsHeaders.ExpectedLastMsgId -> _)
-      ).flatten.foldLeft(headers) { case (h, (k, v)) => h.set(k, v) }
+      opts match
+        // Plain `publish`, every KV `put`/`putAsync`/`delete`/`purge` and every
+        // Object Store chunk write take the defaulted argument, so this is the
+        // overwhelmingly common shape: building five `None`s into a list only
+        // to fold over `Nil` is pure garbage on that path. Matched on the case
+        // class rather than `opts eq PublishOptions.default` so that a caller
+        // who only overrides `timeout` — which is not a header, and is read
+        // separately by `publish`/`publishAsync` — also skips it, and so that
+        // adding a sixth header option to `PublishOptions` fails to compile
+        // here instead of silently dropping a header.
+        case PublishOptions(None, None, None, None, None, _) => headers
+        case _                                               =>
+          List(
+            opts.msgId.map(JsHeaders.MsgId -> _),
+            opts.expectedStream.map(JsHeaders.ExpectedStream -> _),
+            opts.expectedLastSeq.map(v =>
+              JsHeaders.ExpectedLastSeq -> v.toString
+            ),
+            opts.expectedLastSubjectSeq.map(v =>
+              JsHeaders.ExpectedLastSubjectSeq -> v.toString
+            ),
+            opts.expectedLastMsgId.map(JsHeaders.ExpectedLastMsgId -> _)
+          ).flatten.foldLeft(headers) { case (h, (k, v)) => h.set(k, v) }
 
     // ---- Stream management ----
 
