@@ -20,6 +20,7 @@ import cats.effect.Async
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import fs2.{Chunk, Pipe, Pull, Stream}
 import java.nio.charset.StandardCharsets
+import scala.reflect.ClassTag
 import scala.util.{Failure, Success, Try}
 
 /** Configuration for the NATS protocol parser.
@@ -82,6 +83,30 @@ object ProtocolParser:
     */
   private val MaxArgs: Int = 5
 
+  /** Largest number of frames accumulated into one emitted `Chunk`.
+    *
+    * Bounds the length of the pure region the fs2 interpreter has no step
+    * boundary to interrupt, and the blast radius of a caller handing the public
+    * `parseStream` pipe one arbitrarily large `Chunk[Byte]`. A 64 KiB socket
+    * read of 5-byte `+OK` frames already yields ~13k frames, and `parseStream`
+    * takes an unbounded chunk from anyone.
+    *
+    * It is a frame count, not a byte budget, so it does not bound the heap a
+    * batch pins. On the socket path that is bounded anyway by
+    * `Transport.ReadChunkSize`; a caller feeding the pipe one huge chunk of
+    * huge frames can hold a batch of them alongside the carry.
+    */
+  private val MaxBatch: Int = 1024
+
+  /** `Chunk.array` needs a `ClassTag` for its element type, but `O` is abstract
+    * here and adding a `ClassTag[O]` to the public `parseStreamWith` signature
+    * would break binary compatibility. Every emitted value is a `Frame` by the
+    * `O <: Frame` bound, so batches are accumulated as `Array[Frame]` and the
+    * resulting `Chunk[Frame]` is cast back to `Chunk[O]`. Hoisted because
+    * summoning the tag per batch would allocate one.
+    */
+  private val FrameTag: ClassTag[Frame] = ClassTag(classOf[Frame])
+
   /** Mutable parse carry, confined to a single fiber. `[start, end)` is the
     * live (not-yet-parsed) window into `carry`; bytes before `start` are
     * consumed and bytes at/after `end` are garbage.
@@ -100,6 +125,19 @@ object ProtocolParser:
       */
     val argStart: Array[Int] = new Array[Int](MaxArgs)
     val argEnd: Array[Int] = new Array[Int](MaxArgs)
+
+    /** Size of the last multi-frame batch, used to size the next accumulator so
+      * a steady high-rate stream settles at one array allocation per socket
+      * read instead of a doubling sequence per read. Only a size hint: the
+      * array itself is never reused across batches, because the emitted `Chunk`
+      * aliases it.
+      *
+      * Written only for batches of two or more, so a run of single-frame reads
+      * (keepalive, request/reply) does not shrink it back and make the next
+      * burst re-double. A batch after a much larger one over-allocates once and
+      * then sets the hint to its own size, so it self-corrects immediately.
+      */
+    var batchHint: Int = 8
 
   /** Outcome of attempting to parse one frame from the current carry window.
     * `A` is the emitted element type (control frames are `NatsFrame`; data
@@ -178,8 +216,29 @@ object ProtocolParser:
         go(config, state, input, builder).stream
       }
 
-  /** Drive parsing: emit as many complete frames as the current carry allows,
-    * pulling more input whenever a frame can't yet be completed.
+  /** Drive parsing: emit every frame the current carry can yield as one
+    * `Chunk`, then pull more input.
+    *
+    * fs2 charges a fixed cost per emitted *step* — an `Output` node, a `Bind`,
+    * the `>>` continuation closure and one trip through the interpreter's
+    * per-step interrupt guard — and that cost is flat in chunk size, so
+    * `output1` per frame pays it once per message where a batch pays it once
+    * per socket read. One 64 KiB read holds hundreds of small messages.
+    *
+    * The accumulator is a local of this method and deliberately *not* a
+    * parameter of `needMore`: that makes "a parsed frame is never held while
+    * the parser blocks on a read" true by lexical scope rather than by
+    * argument. It matters — the INFO/CONNECT handshake, PING/PONG keepalive and
+    * every request/reply round trip deliver exactly one frame and then wait for
+    * the peer, so a frame stuck in the buffer is a deadlock, not a latency
+    * blip. For the same reason both error exits flush before they raise or emit
+    * the `ParseErrorFrame`: frames parsed ahead of a protocol error have
+    * already been routed to their subscribers on the live path, and core NATS
+    * will not redeliver them.
+    *
+    * Emitted frames own their bytes — `parseOne` copies every payload and
+    * header out of the carry — so holding them while the carry is scanned
+    * further, and compacted, is safe.
     */
   private def go[F[_]: Async, O >: NatsFrame <: Frame](
       config: ParserConfig,
@@ -187,9 +246,33 @@ object ProtocolParser:
       input: Stream[F, Byte],
       builder: MsgBuilder[O]
   ): Pull[F, O, Unit] =
-    parseOne(config, st, builder) match
-      case Step.Emit(frame) =>
-        Pull.output1(frame) >> go(config, st, input, builder)
+    // `first` carries a one-frame batch without allocating an array at all,
+    // which is the shape of every request/reply, keepalive and low-rate
+    // subject, and of any transport whose reads complete at most one frame.
+    var first: O = null.asInstanceOf[O]
+    var buf: Array[Frame] = null
+    var n = 0
+    // The first step that was not an Emit, or null if the batch cap was reached
+    // with parseable bytes still in the carry.
+    var stop: Step[O] = null
+    while stop == null && n < MaxBatch do
+      parseOne(config, st, builder) match
+        case Step.Emit(frame) =>
+          if n == 0 then first = frame
+          else
+            buf = growBatch(buf, n, first, st.batchHint)
+            buf(n) = frame
+          n += 1
+        case other =>
+          stop = other
+
+    // Bound as a `val` so the local `tail` below captures a value rather than a
+    // mutable slot the compiler would have to box into a `Ref`.
+    val last = stop
+
+    // Reached by-name through `>>`, so it stays a thunk the interpreter runs
+    // later; building it eagerly would recurse through the whole input.
+    def tail: Pull[F, O, Unit] = last match
       case Step.NeedMoreControl =>
         needMore(config, st, input, -1, builder)
       case Step.NeedMorePayload(length) =>
@@ -198,6 +281,43 @@ object ProtocolParser:
         emitParseError(config, message)
       case Step.FailHard(message) =>
         Pull.raiseError(fs2.nats.errors.NatsError.ProtocolParseError(message))
+      case _ =>
+        // `last` is null: the batch hit MaxBatch while the carry still holds
+        // parseable bytes, so re-enter without touching upstream. (`Step.Emit`
+        // never lands here — the loop only exits on a non-Emit step — but the
+        // match has to be total.)
+        go(config, st, input, builder)
+
+    if n == 0 then tail
+    else if n == 1 then Pull.output1(first) >> tail
+    else
+      st.batchHint = n
+      // The cast is erasure-safe: every slot was written from a `Step.Emit[O]`,
+      // and only the `ClassTag` the chunk carries is widened to `Frame`.
+      // `Chunk` is covariant, so `Chunk[Frame]` cannot stand in for `Chunk[O]`
+      // without it.
+      Pull.output(
+        Chunk.array(buf, 0, n)(using FrameTag).asInstanceOf[Chunk[O]]
+      ) >> tail
+
+  /** Make room for frame `n` of the current batch, seeding a fresh accumulator
+    * with the frame `go` was holding in `first`. A new array per batch, never a
+    * scratch array on `ParserState`: `Chunk.array` aliases what it is given, so
+    * a reused buffer would let the next batch overwrite an already-emitted
+    * chunk.
+    */
+  private def growBatch(
+      buf: Array[Frame],
+      n: Int,
+      first: Frame,
+      hint: Int
+  ): Array[Frame] =
+    if buf == null then
+      val next = new Array[Frame](math.max(hint, 2))
+      next(0) = first
+      next
+    else if n == buf.length then java.util.Arrays.copyOf(buf, buf.length * 2)
+    else buf
 
   /** Pull one more upstream chunk into the carry and resume, or handle EOF.
     *

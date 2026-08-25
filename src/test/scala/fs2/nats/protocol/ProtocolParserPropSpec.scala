@@ -73,6 +73,37 @@ class ProtocolParserPropSpec extends ScalaCheckSuite:
       .attempt
       .unsafeRunSync()
 
+  /** Frames emitted *before* a terminal error, for both parsers.
+    *
+    * `equiv`'s `(Left, Left)` arm compares only the exception class and
+    * message, so in strict mode — four of the six configs — everything a parser
+    * produced ahead of the error is invisible to the main gate. Batching
+    * changes exactly that: frames parsed from the same carry as the failing one
+    * must still be emitted before the raise, because on the live path they have
+    * already been routed to their subscribers and core NATS will not redeliver
+    * them.
+    */
+  private def runPartial(
+      parser: Pipe[IO, Byte, NatsFrame],
+      chunks: List[Chunk[Byte]]
+  ): List[NatsFrame] =
+    Stream
+      .emits(chunks)
+      .unchunks
+      .through(parser)
+      .handleErrorWith(_ => Stream.empty)
+      .compile
+      .toList
+      .unsafeRunSync()
+
+  private def equivPartial(
+      config: ParserConfig,
+      chunks: List[Chunk[Byte]]
+  ): Prop =
+    val a = runPartial(ProtocolParser.parseStream[IO](config), chunks)
+    val b = runPartial(ReferenceProtocolParser.parseStream[IO](config), chunks)
+    Prop(a.map(norm) == b.map(norm)) :| s"new=$a\nref=$b"
+
   private def equiv(config: ParserConfig, chunks: List[Chunk[Byte]]): Prop =
     val a = run(ProtocolParser.parseStream[IO](config), chunks)
     val b = run(ReferenceProtocolParser.parseStream[IO](config), chunks)
@@ -417,11 +448,24 @@ class ProtocolParserPropSpec extends ScalaCheckSuite:
       for
         line <- nonCanonicalLines
         config <- configs
+        // A well-formed frame ahead of the bad line puts the error in the same
+        // carry as an already-parsed frame. Every entry above is standalone, so
+        // without this dimension no case in the suite pins the order of a batch
+        // flush relative to the ParseErrorFrame or the raise (#45).
+        // The three-frame prefix is what exercises the batched flush: with one
+        // frame ahead of the error the parser emits it with `output1`, and the
+        // array path never runs.
+        prefix <- List("", "PING\r\n", "PING\r\nPONG\r\n+OK\r\n")
         chunk <- List[Array[Byte] => List[Chunk[Byte]]](
           single,
           oneByte,
           fixed(_, 3)
         )
-      yield equiv(config, chunk(bytes(line))) :| line
+      yield
+        val wire = bytes(prefix + line)
+        Prop.all(
+          equiv(config, chunk(wire)) :| s"$prefix$line",
+          equivPartial(config, chunk(wire)) :| s"partial: $prefix$line"
+        )
     Prop.all(cases*)
   }
