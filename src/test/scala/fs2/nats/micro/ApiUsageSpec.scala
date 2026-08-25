@@ -17,6 +17,7 @@
 package fs2.nats.micro
 
 import cats.effect.IO
+import fs2.nats.protocol.Headers
 
 /** The ADR-32 target usage from the design spec, as one shared API object.
   * Compile-level contract only: no server or client is started.
@@ -114,10 +115,27 @@ class ApiUsageSpec extends munit.FunSuite:
         IO.pure(Right(OrdersApi.Order(id.value, 1)))
       }
     val getWithHeaders: MicroHandler[IO] =
+      OrdersApi.get.handleWithHeaders[IO] { (id, _, _) =>
+        IO.pure(
+          Right(
+            Reply(OrdersApi.Order(id.value, 1), Headers("X-Cache" -> "hit"))
+          )
+        )
+      }
+    val getFailing: MicroHandler[IO] =
       OrdersApi.get.handleWithHeaders[IO] { (_, _, _) =>
         IO.pure(Left(OrdersApi.OrderError.NotFound))
       }
     val add: MicroHandler[IO] =
       OrdersApi.add.handle[IO]((_, _) => IO.pure(Right(())))
-    assert(List(get, getWithHeaders, add).forall(_ ne null))
+    assert(List(get, getWithHeaders, getFailing, add).forall(_ ne null))
+  }
+
+  test("Reply carries no headers unless asked for") {
+    assertEquals(Reply("order").headers, Headers.empty)
+    assertEquals(
+      Reply("order", Headers("X-Cache" -> "hit")).headers,
+      Headers("X-Cache" -> "hit")
+    )
+    assertEquals(Reply("order").value, "order")
   }

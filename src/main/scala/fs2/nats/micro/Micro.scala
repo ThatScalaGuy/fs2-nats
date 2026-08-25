@@ -41,15 +41,16 @@ sealed abstract class Micro[F[_]]:
   /** Sugar for endpoints without a request payload. */
   def call[P, E, O](rpc: Rpc[P, Unit, E, O])(params: P): F[Either[E, O]]
 
-  /** Like `call`, but attaches request headers; the server reads them via
-    * `Rpc#handleWithHeaders`.
+  /** Like `call`, but attaches request headers and keeps the reply headers: the
+    * server reads the request headers via `Rpc#handleWithHeaders` and sets the
+    * response headers on the [[Reply]] it returns.
     */
   def callWithHeaders[P, I, E, O](rpc: Rpc[P, I, E, O])(
       params: P,
       in: I,
       headers: Headers,
       timeout: FiniteDuration = 5.seconds
-  ): F[Either[E, O]]
+  ): F[Either[E, Reply[O]]]
 
 object Micro:
 
@@ -62,6 +63,7 @@ object Micro:
           timeout: FiniteDuration
       ): F[Either[E, O]] =
         callWithHeaders[P, I, E, O](rpc)(params, in, Headers.empty, timeout)
+          .map(_.map(_.value))
 
       def call[P, E, O](rpc: Rpc[P, Unit, E, O])(params: P): F[Either[E, O]] =
         callWithHeaders[P, Unit, E, O](rpc)(
@@ -69,14 +71,14 @@ object Micro:
           (),
           Headers.empty,
           5.seconds
-        )
+        ).map(_.map(_.value))
 
       def callWithHeaders[P, I, E, O](rpc: Rpc[P, I, E, O])(
           params: P,
           in: I,
           headers: Headers,
           timeout: FiniteDuration
-      ): F[Either[E, O]] =
+      ): F[Either[E, Reply[O]]] =
         // defer: fill/encode run user codecs that may throw; failures must
         // surface through the returned F, not at call-construction time.
         F.defer {
@@ -99,8 +101,9 @@ object Micro:
                       F.pure(Left(rpc.err.decode(code, desc)))
                     case None =>
                       rpc.out.decode(reply.payload) match
-                        case Right(o) => F.pure(Right(o))
-                        case Left(e)  =>
+                        case Right(o) =>
+                          F.pure(Right(Reply(o, reply.headers)))
+                        case Left(e) =>
                           F.raiseError(
                             NatsError.PayloadDecodeError(subject, e)
                           )

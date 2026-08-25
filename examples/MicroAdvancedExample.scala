@@ -22,6 +22,7 @@ import com.github.plokhotnyuk.jsoniter_scala.core.JsonValueCodec
 import com.github.plokhotnyuk.jsoniter_scala.macros.JsonCodecMaker
 import fs2.nats.client.{ClientConfig, NatsClient}
 import fs2.nats.micro.*
+import fs2.nats.protocol.Headers
 import scala.concurrent.duration.*
 
 /** Advanced micro services example (ADR-32):
@@ -39,8 +40,9 @@ import scala.concurrent.duration.*
   *     successor of the retired `$SRV.SCHEMA` verb)
   *   - service- and endpoint-level metadata (`ServiceConfig.withMetadata`,
   *     `Rpc.withMetadata`), also visible through discovery
-  *   - request headers: the client attaches them with `callWithHeaders`, the
-  *     handler reads them with `handleWithHeaders`
+  *   - headers in both directions: the client attaches request headers with
+  *     `callWithHeaders`, the handler reads them with `handleWithHeaders` and
+  *     answers with a `Reply` that carries the response headers
   *
   * Prerequisites:
   *   - Start a NATS server: docker run -p 4222:4222 nats:latest
@@ -142,7 +144,9 @@ object MicroAdvancedExample extends IOApp:
 
           handlers = List(
             // Params arrive already decoded: (TenantId, OrderId). The header
-            // variant additionally receives the request headers.
+            // variant additionally receives the request headers and returns a
+            // Reply, so the response can carry headers of its own — here the
+            // trace id is echoed back to the caller.
             ShopApi.get.handleWithHeaders[IO] { case ((tenant, id), headers, _) =>
               val trace = headers.get("X-Trace-Id").getOrElse("<none>")
               IO.println(s"  [server] get ${id.value} for '${tenant.value}', trace=$trace") *>
@@ -154,6 +158,7 @@ object MicroAdvancedExample extends IOApp:
                         s"order ${id.value} not found for tenant '${tenant.value}'"
                       )
                     )
+                    .map(order => Reply(order, Headers("X-Trace-Id" -> trace)))
                 }
             },
             // Params: TenantId; body: AddOrder decoded from JSON.
@@ -207,13 +212,20 @@ object MicroAdvancedExample extends IOApp:
         _ <- IO.println(s"get 1: $found")
 
         // Same endpoint with a request header; the handler reads it via
-        // handleWithHeaders.
+        // handleWithHeaders and echoes it back on the Reply, so this call sees
+        // both the value and the response headers.
         traced <- micro.callWithHeaders(ShopApi.get)(
           (acme, OrderId(1)),
           (),
-          fs2.nats.protocol.Headers("X-Trace-Id" -> "trace-42")
+          Headers("X-Trace-Id" -> "trace-42")
         )
-        _ <- IO.println(s"get 1 with trace header: $traced")
+        _ <- traced match
+          case Right(reply) =>
+            IO.println(
+              s"get 1 with trace header: ${reply.value}, " +
+                s"reply headers: ${reply.headers.entries.toList}"
+            )
+          case Left(err) => IO.println(s"get 1 with trace header: $err")
 
         // Both error cases come back as the shared ADT, nothing is raised.
         rejected <- micro.call(ShopApi.add)(acme, AddOrder("espresso", 0))

@@ -16,6 +16,8 @@
 
 package fs2.nats.micro
 
+import cats.Functor
+import cats.syntax.functor.*
 import fs2.nats.protocol.Headers
 
 /** A value describing one endpoint: subject pattern with typed captures `P`,
@@ -48,13 +50,20 @@ final class Rpc[P, I, E, O] private (
   def withMetadata(m: Map[String, String]): Rpc[P, I, E, O] =
     copy(metadata = m)
 
-  /** Attach server logic. */
-  def handle[F[_]](f: (P, I) => F[Either[E, O]]): MicroHandler[F] =
-    new MicroHandler.Impl[F, P, I, E, O](this, (p, _, i) => f(p, i))
+  /** Attach server logic. The reply is published without headers; use
+    * [[handleWithHeaders]] to set them.
+    */
+  def handle[F[_]: Functor](f: (P, I) => F[Either[E, O]]): MicroHandler[F] =
+    new MicroHandler.Impl[F, P, I, E, O](
+      this,
+      (p, _, i) => f(p, i).map(_.map(o => Reply(o)))
+    )
 
-  /** Variant with access to request headers. */
+  /** Variant with access to the request headers, returning a [[Reply]] so the
+    * handler can also set the headers of a successful response.
+    */
   def handleWithHeaders[F[_]](
-      f: (P, Headers, I) => F[Either[E, O]]
+      f: (P, Headers, I) => F[Either[E, Reply[O]]]
   ): MicroHandler[F] =
     new MicroHandler.Impl[F, P, I, E, O](this, f)
 
@@ -78,5 +87,5 @@ object MicroHandler:
 
   private[micro] final class Impl[F[_], P, I, E, O](
       val rpc: Rpc[P, I, E, O],
-      val run: (P, Headers, I) => F[Either[E, O]]
+      val run: (P, Headers, I) => F[Either[E, Reply[O]]]
   ) extends MicroHandler[F]

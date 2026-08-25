@@ -144,10 +144,10 @@ private[micro] final class ServiceRuntime[F[_]](
             rejected(rpc.name, msg, s"invalid request payload: $e")
           case Right(i) =>
             F.defer(h.run(p, msg.headers, i)).attempt.timed.flatMap {
-              case (elapsed, Right(Right(o))) =>
-                Either.catchNonFatal(rpc.out.encode(o)) match
+              case (elapsed, Right(Right(reply))) =>
+                Either.catchNonFatal(rpc.out.encode(reply.value)) match
                   case Right(bytes) =>
-                    publishSuccess(msg, bytes).flatMap {
+                    publishSuccess(msg, bytes, reply.headers).flatMap {
                       case Right(()) => record(rpc.name, elapsed.toNanos, None)
                       case Left(t)   =>
                         record(
@@ -216,13 +216,31 @@ private[micro] final class ServiceRuntime[F[_]](
       .map(c => if c.isControl then ' ' else c)
       .take(256)
 
+  /** Reply header keys and values are handler-supplied and often echo request
+    * data; a CR or LF inside one would start a new line in the reply's header
+    * block, letting a request forge e.g. `Nats-Service-Error-Code` and turn its
+    * own success into an error at the caller. Blank out the control characters
+    * but keep the length: unlike the error descriptions `sanitize` trims, these
+    * are values the handler chose to send.
+    */
+  private def sanitizeHeaders(h: Headers): Headers =
+    if h.entries.forall((k, v) => !hasControl(k) && !hasControl(v)) then h
+    else Headers(h.entries.map((k, v) => (blankControl(k), blankControl(v))))
+
+  private def hasControl(s: String): Boolean = s.exists(_.isControl)
+
+  private def blankControl(s: String): String =
+    s.map(c => if c.isControl then ' ' else c)
+
   private def publishSuccess(
       msg: NatsMessage,
-      bytes: Chunk[Byte]
+      bytes: Chunk[Byte],
+      headers: Headers
   ): F[Either[Throwable, Unit]] =
     msg.replyTo match
-      case Some(rt) => client.publish(rt, bytes).attempt
-      case None     => F.pure(Right(()))
+      case Some(rt) =>
+        client.publish(rt, bytes, sanitizeHeaders(headers)).attempt
+      case None => F.pure(Right(()))
 
   private def publishError(msg: NatsMessage, code: Int, desc: String): F[Unit] =
     msg.replyTo match

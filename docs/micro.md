@@ -49,9 +49,9 @@ your own error ADT with `ServiceErr.from`.
 
 ## Server side
 
-Attach logic with `handle` (or `handleWithHeaders` for access to request
-headers) and start the service as a `Resource`. Release unsubscribes and
-cancels in-flight handlers:
+Attach logic with `handle` (or `handleWithHeaders` to read the request headers
+and set response headers) and start the service as a `Resource`. Release
+unsubscribes and cancels in-flight handlers:
 
 ```scala mdoc:silent
 def server(client: NatsClient[IO]): IO[Unit] =
@@ -88,30 +88,41 @@ def orderClient(client: NatsClient[IO]): IO[Unit] =
   yield ()
 ```
 
-## Request headers
+## Headers
 
-NATS message headers pass through the typed layer untouched: the client
-attaches them with `callWithHeaders`, the server reads them with
-`handleWithHeaders` (for tracing ids, tenant hints and similar cross-cutting
-data that does not belong in the payload):
+NATS message headers pass through the typed layer untouched, in both
+directions — for tracing ids, tenant hints, cache markers and similar
+cross-cutting data that does not belong in the payload. The client attaches
+request headers with `callWithHeaders`; the handler reads them and answers with
+a `Reply`, which is the response value plus the headers to publish with it:
 
 ```scala mdoc:silent
 import fs2.nats.protocol.Headers
 
+val tracedHandler = OrdersApi.get.handleWithHeaders[IO] { (id, headers, _) =>
+  val trace = headers.get("X-Trace-Id").getOrElse("<none>")
+  IO.println(s"get $id, trace=$trace")
+    .as(Right(Reply(s"order $id", Headers("X-Trace-Id" -> trace))))
+}
+
 def tracedCall(client: NatsClient[IO], traceId: String): IO[Unit] =
   Micro(client)
     .callWithHeaders(OrdersApi.get)("1", (), Headers("X-Trace-Id" -> traceId))
-    .void
-
-val tracedHandler = OrdersApi.get.handleWithHeaders[IO] { (id, headers, _) =>
-  IO.println(s"get $id, trace=${headers.get("X-Trace-Id")}")
-    .as(Right(s"order $id"))
-}
+    .flatMap {
+      case Right(reply) =>
+        IO.println(s"${reply.value} (trace ${reply.headers.get("X-Trace-Id")})")
+      case Left(err) => IO.println(s"get failed: $err")
+    }
 ```
 
-Success replies carry no headers in this version (only error replies use the
-ADR-32 error headers), so there is nothing to read on the client side of a
-successful call.
+`Reply(o)` is the no-headers case — it is what `handle` produces and what
+`call` unwraps, so the plain `handle`/`call` pair keeps working on `O` and
+never mentions `Reply`. Use `handleWithHeaders` whenever you want to set
+response headers, even if you ignore the request headers.
+
+Only successful replies carry custom headers: an error reply is the empty
+ADR-32 body plus `Nats-Service-Error-Code` / `Nats-Service-Error`, so a
+handler's `Left(e)` has nowhere to put them.
 
 ## Error semantics
 
@@ -208,5 +219,6 @@ def printStats(svc: NatsService[IO]): IO[Unit] =
 - Endpoints join queue group `"q"` by default (per ADR-32), so multiple
   instances load-balance automatically. Override per service with
   `ServiceConfig.withQueueGroup` or per endpoint with `Rpc.withQueueGroup`.
-- Success replies are published without headers; setting response headers on a
-  successful reply is not supported yet.
+- Control characters in response header keys and values are replaced with
+  spaces before the reply is published: a CR/LF there would start a new line in
+  the header block and let a request forge headers in its own reply.

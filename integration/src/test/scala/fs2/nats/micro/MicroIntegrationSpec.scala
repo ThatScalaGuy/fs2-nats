@@ -91,7 +91,7 @@ class MicroIntegrationSpec extends CatsEffectSuite:
       .timeout(15.seconds)
   }
 
-  test("request headers round trip: callWithHeaders to handleWithHeaders") {
+  test("headers round trip: request headers in, reply headers out") {
     val traceRpc = Rpc(
       "trace",
       pattern["it.micro.hdr.trace"],
@@ -109,7 +109,14 @@ class MicroIntegrationSpec extends CatsEffectSuite:
         val handlers = List(
           traceRpc.handleWithHeaders[IO] { (_, headers, in) =>
             val trace = headers.get("X-Trace-Id").getOrElse("<none>")
-            IO.pure(Right(s"$in/trace=$trace"))
+            IO.pure(
+              Right(
+                Reply(
+                  s"$in/trace=$trace",
+                  fs2.nats.protocol.Headers("X-Handled-By" -> "it-hdr")
+                )
+              )
+            )
           }
         )
 
@@ -123,7 +130,11 @@ class MicroIntegrationSpec extends CatsEffectSuite:
             )
             withoutHeader <- micro.call(traceRpc)((), "ping")
           yield
-            assertEquals(withHeader, Right("ping/trace=abc-123"))
+            assertEquals(withHeader.map(_.value), Right("ping/trace=abc-123"))
+            assertEquals(
+              withHeader.map(_.headers.get("X-Handled-By")),
+              Right(Some("it-hdr"))
+            )
             assertEquals(withoutHeader, Right("ping/trace=<none>"))
         }
       }
