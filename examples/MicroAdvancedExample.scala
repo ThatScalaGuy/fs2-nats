@@ -37,6 +37,8 @@ import scala.concurrent.duration.*
   *   - payload schemas via `Payload.withSchema`, published in the `$SRV.INFO`
   *     endpoint metadata as `request_schema`/`response_schema` (the ADR-32
   *     successor of the retired `$SRV.SCHEMA` verb)
+  *   - service- and endpoint-level metadata (`ServiceConfig.withMetadata`,
+  *     `Rpc.withMetadata`), also visible through discovery
   *
   * Prerequisites:
   *   - Start a NATS server: docker run -p 4222:4222 nats:latest
@@ -92,7 +94,8 @@ object MicroAdvancedExample extends IOApp:
     )
 
     /** shop.<tenant>.orders.get.<id> — two captures bound to a tuple of
-      * domain classes; arity is checked at compile time.
+      * domain classes; arity is checked at compile time. The endpoint
+      * metadata shows up in this endpoint's `$SRV.INFO` entry.
       */
     val get = Rpc(
       name = "get",
@@ -100,7 +103,7 @@ object MicroAdvancedExample extends IOApp:
       in = Payload.empty,
       err = orderErr,
       out = Payload.json[Order]
-    )
+    ).withMetadata(Map("stability" -> "stable", "owner" -> "orders-team"))
 
     private val addOrderSchema =
       """{"type":"object","properties":{"item":{"type":"string"},"quantity":{"type":"integer"}},"required":["item","quantity"]}"""
@@ -171,6 +174,8 @@ object MicroAdvancedExample extends IOApp:
 
           serviceConfig = ServiceConfig("shop", "1.0.0")
             .withDescription("multi-tenant order service")
+            // Service-level metadata: top level of PING/INFO/STATS responses.
+            .withMetadata(Map("region" -> "eu-central"))
 
           _ <- NatsService(client, serviceConfig, handlers).use { _ =>
             IO.sleep(100.millis) *> typedCalls(client) *> schemaInfo(client)
@@ -207,11 +212,12 @@ object MicroAdvancedExample extends IOApp:
       yield ()
     }
 
-  /** The schemas attached with `Payload.withSchema` are visible to any client
-    * via discovery, e.g. `nats micro info shop`.
+  /** The schemas attached with `Payload.withSchema` and the metadata from
+    * `withMetadata` are visible to any client via discovery, e.g.
+    * `nats micro info shop`.
     */
   private def schemaInfo(client: NatsClient[IO]): IO[Unit] =
-    IO.println("\n--- $SRV.INFO with schemas ---") *>
+    IO.println("\n--- $SRV.INFO with metadata and schemas ---") *>
       client.request("$SRV.INFO.shop", fs2.Chunk.empty).flatMap { reply =>
         IO.println(reply.payloadAsString)
       }

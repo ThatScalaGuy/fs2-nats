@@ -111,6 +111,29 @@ responses. Any plain request works, e.g. `nats req '$SRV.PING' ''` or the
 `nats micro` CLI. `INFO` lists the endpoints with their wildcard subjects,
 queue groups and metadata.
 
+### Metadata
+
+Both the service and each endpoint carry an immutable `Map[String, String]` of
+metadata (ADR-33), set at definition time:
+
+```scala mdoc:silent
+val describedConfig = ServiceConfig("orders", "1.0.0")
+  .withMetadata(Map("region" -> "eu-central", "owner" -> "orders-team"))
+
+val describedRpc = Rpc(
+  name = "get-described",
+  subject = pattern["orders.get.*"].bind[String],
+  in = Payload.empty,
+  err = ServiceErr.plain,
+  out = Payload.string
+).withMetadata(Map("stability" -> "beta"))
+```
+
+Service metadata appears in the top level of all three discovery responses;
+endpoint metadata appears in that endpoint's `INFO` entry (and locally via
+`NatsService#info`). There is no way to change metadata on a running service —
+endpoints are fixed values passed to `NatsService(...)` at construction.
+
 ### Publishing payload schemas
 
 Attach a schema description to a payload with `Payload.withSchema`; the text is
