@@ -34,6 +34,9 @@ import scala.concurrent.duration.*
   *   - a typed error ADT (`OrderError`) instead of raw `(code, message)`
   *     pairs: both sides pattern match on the same cases, the wire carries
   *     only the ADR-32 error headers
+  *   - payload schemas via `Payload.withSchema`, published in the `$SRV.INFO`
+  *     endpoint metadata as `request_schema`/`response_schema` (the ADR-32
+  *     successor of the retired `$SRV.SCHEMA` verb)
   *
   * Prerequisites:
   *   - Start a NATS server: docker run -p 4222:4222 nats:latest
@@ -99,13 +102,21 @@ object MicroAdvancedExample extends IOApp:
       out = Payload.json[Order]
     )
 
-    /** shop.<tenant>.orders.add — one capture plus a JSON request body. */
+    private val addOrderSchema =
+      """{"type":"object","properties":{"item":{"type":"string"},"quantity":{"type":"integer"}},"required":["item","quantity"]}"""
+    private val orderSchema =
+      """{"type":"object","properties":{"id":{"type":"integer"},"item":{"type":"string"},"quantity":{"type":"integer"}}}"""
+
+    /** shop.<tenant>.orders.add — one capture plus a JSON request body. The
+      * attached schemas show up in `$SRV.INFO` as `request_schema` /
+      * `response_schema` in this endpoint's metadata.
+      */
     val add = Rpc(
       name = "add",
       subject = pattern["shop.*.orders.add"].bind[TenantId],
-      in = Payload.json[AddOrder],
+      in = Payload.withSchema(Payload.json[AddOrder], addOrderSchema),
       err = orderErr,
-      out = Payload.json[Order]
+      out = Payload.withSchema(Payload.json[Order], orderSchema)
     )
 
   // ---- server + client ---------------------------------------------------
@@ -162,7 +173,7 @@ object MicroAdvancedExample extends IOApp:
             .withDescription("multi-tenant order service")
 
           _ <- NatsService(client, serviceConfig, handlers).use { _ =>
-            IO.sleep(100.millis) *> typedCalls(client)
+            IO.sleep(100.millis) *> typedCalls(client) *> schemaInfo(client)
           }
 
           _ <- IO.println("\nExample completed successfully!")
@@ -195,3 +206,12 @@ object MicroAdvancedExample extends IOApp:
           case other                        => IO.println(s"get as globex: $other")
       yield ()
     }
+
+  /** The schemas attached with `Payload.withSchema` are visible to any client
+    * via discovery, e.g. `nats micro info shop`.
+    */
+  private def schemaInfo(client: NatsClient[IO]): IO[Unit] =
+    IO.println("\n--- $SRV.INFO with schemas ---") *>
+      client.request("$SRV.INFO.shop", fs2.Chunk.empty).flatMap { reply =>
+        IO.println(reply.payloadAsString)
+      }

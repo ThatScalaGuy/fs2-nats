@@ -109,8 +109,34 @@ and `$SRV.STATS` — each in the bare form, suffixed with the service name, and
 suffixed with `<name>.<id>` — with the standard `io.nats.micro.v1.*` JSON
 responses. Any plain request works, e.g. `nats req '$SRV.PING' ''` or the
 `nats micro` CLI. `INFO` lists the endpoints with their wildcard subjects,
-queue groups and metadata; payload schemas attached via `Payload.withSchema`
-appear as `request_schema`/`response_schema`.
+queue groups and metadata.
+
+### Publishing payload schemas
+
+Attach a schema description to a payload with `Payload.withSchema`; the text is
+free-form (JSON Schema, a URL, a type name):
+
+```scala mdoc:silent
+val addOrderSchema =
+  """{"type":"object","properties":{"item":{"type":"string"},"quantity":{"type":"integer"}}}"""
+
+val addWithSchema = Rpc(
+  name = "add-documented",
+  subject = pattern["orders.add"],
+  in = Payload.withSchema(Payload.string, addOrderSchema),
+  err = ServiceErr.plain,
+  out = Payload.string
+)
+```
+
+The service publishes these in the endpoint's `INFO` metadata under the keys
+`request_schema` and `response_schema`, next to any explicit `Rpc.withMetadata`
+entries (explicit keys win on collision). This is the current ADR-32 way to
+expose schemas: early versions of the services API had a dedicated `$SRV.SCHEMA`
+verb (old nats.go releases implemented it), but it was removed from the spec and
+today's clients and the `nats` CLI only read the `INFO` metadata. Nothing is
+derived automatically — `Payload.json` publishes no schema unless you attach
+one.
 
 ## Stats and reset
 
