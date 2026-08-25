@@ -21,6 +21,7 @@ import cats.syntax.all.*
 import fs2.nats.client.NatsClient
 import fs2.nats.errors.NatsError
 import fs2.nats.micro.protocol.MicroHeaders
+import fs2.nats.protocol.Headers
 
 import scala.concurrent.duration.*
 
@@ -40,6 +41,16 @@ sealed abstract class Micro[F[_]]:
   /** Sugar for endpoints without a request payload. */
   def call[P, E, O](rpc: Rpc[P, Unit, E, O])(params: P): F[Either[E, O]]
 
+  /** Like `call`, but attaches request headers; the server reads them via
+    * `Rpc#handleWithHeaders`.
+    */
+  def callWithHeaders[P, I, E, O](rpc: Rpc[P, I, E, O])(
+      params: P,
+      in: I,
+      headers: Headers,
+      timeout: FiniteDuration = 5.seconds
+  ): F[Either[E, O]]
+
 object Micro:
 
   def apply[F[_]](client: NatsClient[F])(using F: Async[F]): Micro[F] =
@@ -48,6 +59,22 @@ object Micro:
       def call[P, I, E, O](rpc: Rpc[P, I, E, O])(
           params: P,
           in: I,
+          timeout: FiniteDuration
+      ): F[Either[E, O]] =
+        callWithHeaders[P, I, E, O](rpc)(params, in, Headers.empty, timeout)
+
+      def call[P, E, O](rpc: Rpc[P, Unit, E, O])(params: P): F[Either[E, O]] =
+        callWithHeaders[P, Unit, E, O](rpc)(
+          params,
+          (),
+          Headers.empty,
+          5.seconds
+        )
+
+      def callWithHeaders[P, I, E, O](rpc: Rpc[P, I, E, O])(
+          params: P,
+          in: I,
+          headers: Headers,
           timeout: FiniteDuration
       ): F[Either[E, O]] =
         // defer: fill/encode run user codecs that may throw; failures must
@@ -62,7 +89,7 @@ object Micro:
               )
             case Right(subject) =>
               client
-                .request(subject, rpc.in.encode(in), timeout = timeout)
+                .request(subject, rpc.in.encode(in), headers, timeout)
                 .flatMap { reply =>
                   reply.headers.get(MicroHeaders.ErrorCode) match
                     case Some(codeStr) =>
@@ -79,6 +106,3 @@ object Micro:
                           )
                 }
         }
-
-      def call[P, E, O](rpc: Rpc[P, Unit, E, O])(params: P): F[Either[E, O]] =
-        call[P, Unit, E, O](rpc)(params, (), 5.seconds)

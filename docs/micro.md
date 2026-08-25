@@ -88,6 +88,31 @@ def orderClient(client: NatsClient[IO]): IO[Unit] =
   yield ()
 ```
 
+## Request headers
+
+NATS message headers pass through the typed layer untouched: the client
+attaches them with `callWithHeaders`, the server reads them with
+`handleWithHeaders` (for tracing ids, tenant hints and similar cross-cutting
+data that does not belong in the payload):
+
+```scala mdoc:silent
+import fs2.nats.protocol.Headers
+
+def tracedCall(client: NatsClient[IO], traceId: String): IO[Unit] =
+  Micro(client)
+    .callWithHeaders(OrdersApi.get)("1", (), Headers("X-Trace-Id" -> traceId))
+    .void
+
+val tracedHandler = OrdersApi.get.handleWithHeaders[IO] { (id, headers, _) =>
+  IO.println(s"get $id, trace=${headers.get("X-Trace-Id")}")
+    .as(Right(s"order $id"))
+}
+```
+
+Success replies carry no headers in this version (only error replies use the
+ADR-32 error headers), so there is nothing to read on the client side of a
+successful call.
+
 ## Error semantics
 
 - A handler's `Left(e)` is encoded via the endpoint's `ServiceErr` into the

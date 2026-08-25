@@ -39,6 +39,8 @@ import scala.concurrent.duration.*
   *     successor of the retired `$SRV.SCHEMA` verb)
   *   - service- and endpoint-level metadata (`ServiceConfig.withMetadata`,
   *     `Rpc.withMetadata`), also visible through discovery
+  *   - request headers: the client attaches them with `callWithHeaders`, the
+  *     handler reads them with `handleWithHeaders`
   *
   * Prerequisites:
   *   - Start a NATS server: docker run -p 4222:4222 nats:latest
@@ -139,17 +141,20 @@ object MicroAdvancedExample extends IOApp:
           )
 
           handlers = List(
-            // Params arrive already decoded: (TenantId, OrderId).
-            ShopApi.get.handle[IO] { case ((tenant, id), _) =>
-              store.get.map { case (_, orders) =>
-                orders
-                  .get((tenant, id))
-                  .toRight(
-                    OrderError.NotFound(
-                      s"order ${id.value} not found for tenant '${tenant.value}'"
+            // Params arrive already decoded: (TenantId, OrderId). The header
+            // variant additionally receives the request headers.
+            ShopApi.get.handleWithHeaders[IO] { case ((tenant, id), headers, _) =>
+              val trace = headers.get("X-Trace-Id").getOrElse("<none>")
+              IO.println(s"  [server] get ${id.value} for '${tenant.value}', trace=$trace") *>
+                store.get.map { case (_, orders) =>
+                  orders
+                    .get((tenant, id))
+                    .toRight(
+                      OrderError.NotFound(
+                        s"order ${id.value} not found for tenant '${tenant.value}'"
+                      )
                     )
-                  )
-              }
+                }
             },
             // Params: TenantId; body: AddOrder decoded from JSON.
             ShopApi.add.handle[IO] { (tenant, req) =>
@@ -200,6 +205,15 @@ object MicroAdvancedExample extends IOApp:
         // I = Unit sugar: only params, here the (TenantId, OrderId) tuple.
         found <- micro.call(ShopApi.get)((acme, OrderId(1)))
         _ <- IO.println(s"get 1: $found")
+
+        // Same endpoint with a request header; the handler reads it via
+        // handleWithHeaders.
+        traced <- micro.callWithHeaders(ShopApi.get)(
+          (acme, OrderId(1)),
+          (),
+          fs2.nats.protocol.Headers("X-Trace-Id" -> "trace-42")
+        )
+        _ <- IO.println(s"get 1 with trace header: $traced")
 
         // Both error cases come back as the shared ADT, nothing is raised.
         rejected <- micro.call(ShopApi.add)(acme, AddOrder("espresso", 0))

@@ -91,6 +91,45 @@ class MicroIntegrationSpec extends CatsEffectSuite:
       .timeout(15.seconds)
   }
 
+  test("request headers round trip: callWithHeaders to handleWithHeaders") {
+    val traceRpc = Rpc(
+      "trace",
+      pattern["it.micro.hdr.trace"],
+      Payload.string,
+      ServiceErr.plain,
+      Payload.string
+    )
+
+    NatsClient
+      .connect[IO](clientConfig)
+      .use { client =>
+        val micro = Micro(client)
+        val config =
+          ServiceConfig(s"it-hdr-${System.currentTimeMillis()}", "1.0.0")
+        val handlers = List(
+          traceRpc.handleWithHeaders[IO] { (_, headers, in) =>
+            val trace = headers.get("X-Trace-Id").getOrElse("<none>")
+            IO.pure(Right(s"$in/trace=$trace"))
+          }
+        )
+
+        NatsService[IO](client, config, handlers).use { _ =>
+          for
+            _ <- IO.sleep(150.millis)
+            withHeader <- micro.callWithHeaders(traceRpc)(
+              (),
+              "ping",
+              fs2.nats.protocol.Headers("X-Trace-Id" -> "abc-123")
+            )
+            withoutHeader <- micro.call(traceRpc)((), "ping")
+          yield
+            assertEquals(withHeader, Right("ping/trace=abc-123"))
+            assertEquals(withoutHeader, Right("ping/trace=<none>"))
+        }
+      }
+      .timeout(15.seconds)
+  }
+
   test("error paths come back as typed Lefts") {
     val leftRpc = Rpc(
       "left",
