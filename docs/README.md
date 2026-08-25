@@ -9,8 +9,8 @@ happens until you ask it to.*
 `fs2-nats` lets you talk to NATS the functional way. Subscriptions are native
 `fs2.Stream`s, the client is a `Resource` that cleans up after itself,
 reconnection and backpressure are built in, and the whole surface — core
-pub/sub, request/reply, JetStream, Key-Value, and Object Store — stays inside
-Cats Effect from the first byte to the last. No callbacks, no hidden threads, no
+pub/sub, request/reply, JetStream, Key-Value, Object Store, and micro
+services — stays inside Cats Effect from the first byte to the last. No callbacks, no hidden threads, no
 surprises.
 
 ## Highlights
@@ -21,6 +21,7 @@ surprises.
 - **JetStream** — streams, consumers, persistent publish (`PubAck`), pull & push consume with full ack semantics
 - **Key-Value** — buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch
 - **Object Store** — large binary objects chunked over JetStream with streaming put/get, SHA-256 verification, links, and watch
+- **Micro Services** — typed request/reply endpoints (ADR-32) with compile-time subject patterns, typed errors, discovery, and per-endpoint stats
 - **Headers** — full NATS 2.2+ headers support (HPUB/HMSG)
 - **Backpressure** — configurable slow-consumer policies (block / drop / error)
 - **Reconnection** — exponential backoff with full jitter, automatic subscription replay, and cluster failover
@@ -31,7 +32,7 @@ surprises.
 
 |                 | Version                       |
 | --------------- | ----------------------------- |
-| **Scala**       | 3.3.7 (Scala 3.3 **LTS**)     |
+| **Scala**       | 3.3.x (Scala 3.3 **LTS**)     |
 | **JDK**         | 11, 17, 21, 25 — minimum 11   |
 | **Cats Effect** | 3.7.x                         |
 | **FS2**         | 3.13.x                        |
@@ -94,7 +95,11 @@ val program: IO[Unit] =
 - **[JetStream](jetstream.md)** — streams, persistent publish, and pull/push consumers.
 - **[Key-Value Store](key-value.md)** — buckets, optimistic concurrency, history, and watch.
 - **[Object Store](object-store.md)** — streaming large binary objects with SHA-256 verification.
+- **[Micro Services](micro.md)** — typed request/reply endpoints with discovery and stats.
 - **[Authentication & TLS](auth.md)** — token, user/password, NKey, `.creds`, and (mutual) TLS.
 
 The code examples on every page are compiled against the published API as part
-of the build, so they stay in step with the library.
+of the build, so they stay in step with the library. Complete runnable programs
+for every module live in the
+[`examples/` directory](https://github.com/ThatScalaGuy/fs2-nats/tree/main/examples)
+on GitHub, and each feature page links to its example.

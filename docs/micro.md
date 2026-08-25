@@ -6,6 +6,14 @@ is described once as a plain `Rpc` value — subject pattern, request/response
 payloads, typed error — and the same value is interpreted by the server
 (`NatsService`) and the client (`Micro`).
 
+Two runnable examples accompany this page:
+[`MicroExample.scala`](https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/MicroExample.scala)
+covers the basics;
+[`MicroAdvancedExample.scala`](https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/MicroAdvancedExample.scala)
+runs everything from the advanced sections below — domain-typed captures, JSON
+payloads, a typed error ADT, schemas, metadata and headers — against a live
+server.
+
 The snippets below share these imports:
 
 ```scala mdoc:silent
@@ -43,9 +51,10 @@ object OrdersApi:
   )
 ```
 
-`Payload` provides `empty`, `bytes`, `string` and `json` (jsoniter);
+`Payload` provides `empty`, `bytes`, `string` and `json` (jsoniter), plus
+`from`/`imap` for anything else — see the JSON payloads section below.
 `ServiceErr.plain` passes the raw `(code, description)` pair through — map it to
-your own error ADT with `ServiceErr.from`.
+your own error ADT with `ServiceErr.from`, covered in the typed errors section.
 
 ## Server side
 
@@ -73,6 +82,22 @@ def server(client: NatsClient[IO]): IO[Unit] =
   }
 ```
 
+`ServiceConfig` carries more than name and version: `withDescription` sets the
+human-readable description shown by `nats micro info`, and `withMaxConcurrent`
+bounds how many handlers may run at once *per endpoint* (default 64) — further
+requests wait on the subscription until a slot frees up:
+
+```scala mdoc:silent
+val tunedConfig = ServiceConfig("orders", "1.0.0")
+  .withDescription("order management")
+  .withMaxConcurrent(16)
+```
+
+`NatsService(...)` validates its inputs during acquisition and raises
+`IllegalArgumentException` on violations: service and endpoint names must match
+`[A-Za-z0-9-_]+`, the version must be SemVer, and the handler list must be
+non-empty with unique endpoint names.
+
 ## Client side
 
 `Micro.call` fills the captures into the subject and decodes the reply. There
@@ -87,6 +112,130 @@ def orderClient(client: NatsClient[IO]): IO[Unit] =
     _     <- IO.println(s"add: $added, get: $found")
   yield ()
 ```
+
+Calls time out after 5 seconds by default; `call` and `callWithHeaders` take a
+`timeout` parameter to override that per call:
+
+```scala mdoc:silent
+import scala.concurrent.duration.*
+
+def slowAdd(client: NatsClient[IO]): IO[Either[(Int, String), String]] =
+  Micro(client).call(OrdersApi.add)((), "1x espresso", timeout = 30.seconds)
+```
+
+On a `Payload.empty` endpoint the parameterless sugar always wins overload
+resolution, so there the deadline comes from `callWithHeaders` (pass
+`Headers.empty` if you have nothing to send — see the headers section).
+
+A call that misses its deadline raises `NatsError.Timeout` in `F` (see error
+semantics below).
+
+## Domain types in subject captures
+
+`bind` accepts any type with a `TokenCodec` — instances for `String`, `Int`,
+`Long` and `java.util.UUID` are provided. Wrap them with `imap` (or build one
+from scratch with `TokenCodec.from`) to carry domain types instead of raw
+strings; a pattern with 2–4 captures binds the matching tuple:
+
+```scala mdoc:silent
+final case class TenantId(value: String)
+final case class OrderId(value: Long)
+
+object ShopIds:
+  given TokenCodec[TenantId] = TokenCodec.string.imap(TenantId.apply)(_.value)
+  given TokenCodec[OrderId]  = TokenCodec.long.imap(OrderId.apply)(_.value)
+
+import ShopIds.given
+
+/** shop.<tenant>.orders.get.<id> — two captures decode to a tuple. */
+val getForTenant = Rpc(
+  name = "get-for-tenant",
+  subject = pattern["shop.*.orders.get.*"].bind[(TenantId, OrderId)],
+  in = Payload.empty,
+  err = ServiceErr.plain,
+  out = Payload.string
+)
+
+def find(client: NatsClient[IO]): IO[Either[(Int, String), String]] =
+  Micro(client).call(getForTenant)((TenantId("acme"), OrderId(1)))
+```
+
+A request whose token does not decode — `shop.acme.orders.get.oops` here,
+since `oops` is no `Long` — is answered with a `400` before any handler runs.
+
+## JSON payloads and custom codecs
+
+`Payload.json[A]` serializes with jsoniter-scala. It summons a
+`JsonValueCodec[A]`, which you derive with `JsonCodecMaker.make` — add the
+macros to your build; `compile-internal` keeps them off your runtime classpath:
+
+```scala
+libraryDependencies +=
+  "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-macros" % "2.40.1" % "compile-internal"
+```
+
+```scala mdoc:silent
+import com.github.plokhotnyuk.jsoniter_scala.core.JsonValueCodec
+import com.github.plokhotnyuk.jsoniter_scala.macros.JsonCodecMaker
+
+final case class AddOrder(item: String, quantity: Int)
+final case class Order(id: Long, item: String, quantity: Int)
+
+object ShopJson:
+  given JsonValueCodec[AddOrder] = JsonCodecMaker.make
+  given JsonValueCodec[Order]    = JsonCodecMaker.make
+
+import ShopJson.given
+
+val addTyped = Rpc(
+  name = "add-typed",
+  subject = pattern["orders.add-typed"],
+  in = Payload.json[AddOrder],
+  err = ServiceErr.plain,
+  out = Payload.json[Order]
+)
+```
+
+jsoniter is not required, though: a `Payload` is just an encode/decode pair
+over `Chunk[Byte]`, so any serialization plugs in via `Payload.from(enc, dec)`,
+and `imap` refines an existing codec — its decode side may reject:
+
+```scala mdoc:silent
+val intPayload: Payload[Int] =
+  Payload.string.imap(s => s.toIntOption.toRight(s"not an int: '$s'"))(_.toString)
+```
+
+## Typed errors
+
+`ServiceErr.plain` exposes errors as the raw `(Int, String)` pair. A shared API
+usually wants an ADT both sides pattern-match on; `ServiceErr.from` maps
+between the two. Only the code and description travel on the wire, and `decode`
+must be total — give it a catch-all case for codes this version of the client
+does not know:
+
+```scala mdoc:silent
+enum OrderError:
+  case NotFound(description: String)
+  case InvalidQuantity(description: String)
+  case Unknown(code: Int, description: String)
+
+val orderErr: ServiceErr[OrderError] = ServiceErr.from(
+  encode = {
+    case OrderError.NotFound(d)        => (404, d)
+    case OrderError.InvalidQuantity(d) => (422, d)
+    case OrderError.Unknown(code, d)   => (code, d)
+  },
+  decode = (code, description) =>
+    code match
+      case 404   => OrderError.NotFound(description)
+      case 422   => OrderError.InvalidQuantity(description)
+      case other => OrderError.Unknown(other, description)
+)
+```
+
+An endpoint defined with `err = orderErr` hands its handlers
+`Left(OrderError.NotFound(...))` and returns the same value to callers — no
+exceptions involved on either side.
 
 ## Headers
 
@@ -132,6 +281,14 @@ handler's `Left(e)` has nowhere to put them.
 - A handler exception becomes a `500` with the exception message; a request
   whose subject captures or payload do not decode is answered with `400` before
   the handler runs.
+- The error description is sanitized before publishing: only the first line
+  survives, remaining control characters are blanked, and it is capped at 256
+  characters — long or multi-line messages arrive truncated at the client.
+- A throwing codec cannot kill an endpoint: a request `decode` that throws is
+  answered with `400`, a response or error `encode` that throws becomes a
+  `500`, and a failed reply publish is swallowed but recorded in the endpoint's
+  stats. A request without a reply subject is processed, but no reply is
+  published.
 - The client raises in `F` only transport failures — `NatsError.Timeout`,
   `NatsError.NoResponders` (no instance subscribed) and
   `NatsError.PayloadDecodeError` (a success reply whose body does not decode) —
@@ -143,7 +300,9 @@ handler's `Left(e)` has nowhere to put them.
 Every instance answers the ADR-32 discovery subjects `$SRV.PING`, `$SRV.INFO`
 and `$SRV.STATS` — each in the bare form, suffixed with the service name, and
 suffixed with `<name>.<id>` — with the standard `io.nats.micro.v1.*` JSON
-responses. Any plain request works, e.g. `nats req '$SRV.PING' ''` or the
+responses. The instance id in that last form is available locally as
+`NatsService#id`, e.g. to target one specific instance or correlate logs with
+discovery output. Any plain request works, e.g. `nats req '$SRV.PING' ''` or the
 `nats micro` CLI. `INFO` lists the endpoints with their wildcard subjects,
 queue groups and metadata.
 
@@ -199,23 +358,37 @@ one.
 
 ## Stats and reset
 
-The `NatsService` handle exposes the same data locally: `info`, `stats`
-(per-endpoint request/error counters, last error, processing times) and `reset`
-(zero all counters and re-stamp `started`):
+The `NatsService` handle exposes the same data locally: `info`, `stats` and
+`reset` (zero all counters and re-stamp `started`). Each `EndpointStats`
+carries `name`, `subject`, `queueGroup`, the `numRequests`/`numErrors`
+counters, the `lastError` description, and total and average processing times
+as `FiniteDuration`:
 
 ```scala mdoc:silent
 def printStats(svc: NatsService[IO]): IO[Unit] =
   svc.stats.flatMap { s =>
-    s.endpoints.traverse_ { e =>
-      IO.println(s"${e.name}: ${e.numRequests} requests, ${e.numErrors} errors")
-    }
+    IO.println(s"${s.name} (${s.id}) up since ${s.started}") *>
+      s.endpoints.traverse_ { e =>
+        IO.println(
+          s"${e.name} @ ${e.subject}: ${e.numRequests} requests, " +
+            s"${e.numErrors} errors (last: ${e.lastError.getOrElse("-")}), " +
+            s"avg ${e.averageProcessingTime.toMicros}µs"
+        )
+      }
   }
 ```
 
 ## Notes
 
 - Subject patterns support at most 4 captures: 1 capture binds any `A` with a
-  `TokenCodec`, 2–4 captures bind `Tuple2`..`Tuple4`.
+  `TokenCodec`, 2–4 captures bind `Tuple2`..`Tuple4`. The `pattern` macro
+  rejects empty tokens, whitespace, wildcards embedded in a token and a
+  non-final `>` — all at compile time. `SubjectPattern#render` returns the
+  original wildcard literal, e.g. for logging.
+- On the client, params are encoded back into subject tokens; a `*` capture
+  whose encoded token is empty or contains `.`, whitespace, `*` or `>` raises
+  `IllegalArgumentException` before anything is published. A `>` tail may
+  contain dots (it spans multiple tokens); only an empty tail is rejected.
 - Endpoints join queue group `"q"` by default (per ADR-32), so multiple
   instances load-balance automatically. Override per service with
   `ServiceConfig.withQueueGroup` or per endpoint with `Rpc.withQueueGroup`.

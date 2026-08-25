@@ -1,7 +1,11 @@
 # Getting Started
 
 This page covers the core pub/sub surface: connecting, publishing, subscribing,
-wildcards, queue groups, connection events, and request/reply.
+wildcards, queue groups, connection events, and request/reply. Runnable
+versions of everything here (plus a request/reply responder and a queue-group
+demo) are in
+[`Basic.scala`](https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/Basic.scala)
+on GitHub.
 
 ## Prerequisites
 
@@ -48,6 +52,17 @@ val program: IO[Unit] =
   }
 ```
 
+Instead of building `Host`/`Port` by hand, `ClientConfig.localhost()` covers
+local development and `ClientConfig.fromUrl` parses `nats://host:4222` and
+`tls://host:4222` URLs (credentials are configured separately — see
+[Authentication & TLS](auth.md)); `fromUrls` takes a list of cluster seed
+servers:
+
+```scala mdoc:silent
+val local  = ClientConfig.localhost()
+val parsed = ClientConfig.fromUrl("nats://demo.nats.io:4222")
+```
+
 ## Publishing with headers
 
 NATS 2.2+ headers are first class. Build a `Headers` value and pass it to
@@ -60,6 +75,16 @@ def publishWithHeaders(client: NatsClient[IO]): IO[Unit] =
     "X-Timestamp"  -> System.currentTimeMillis().toString
   )
   client.publish("events.created", Chunk.array("""{"id": 1}""".getBytes), headers)
+```
+
+On the receiving side, `msg.headers` reads case-insensitively: `get` returns
+the first value, `getAll` every value of a repeated key. `Headers` is
+immutable — `add` appends a value, `set` replaces all values of a key, and
+`remove` drops it:
+
+```scala mdoc:silent
+def requestId(msg: NatsMessage): Option[String] =
+  msg.headers.get("x-request-id")
 ```
 
 ## Wildcard subscriptions
@@ -110,15 +135,61 @@ def watchEvents(client: NatsClient[IO]): IO[Unit] =
   }.compile.drain
 ```
 
+Further variants: `Reconnecting(attempt, delayMs)` before each attempt,
+`ProtocolError(message, fatal)`, `ServerInfoUpdated(info)` on a fresh `INFO`,
+`LameDuckMode` when the server announces it is draining, and
+`MaxReconnectsExceeded(attempts, lastError)` when the client gives up.
+
+## Inspecting the connection
+
+`serverInfo` exposes the server's `INFO` (id, version, `maxPayload`, whether
+JetStream and headers are available, ...), and `isConnected` reports the live
+connection state:
+
+```scala mdoc:silent
+def payloadLimit(client: NatsClient[IO]): IO[Long] =
+  client.serverInfo.map(_.maxPayload)
+```
+
 ## Request/Reply
 
 `request` publishes to a shared response inbox and awaits a single reply. It
 fails fast with `NatsError.NoResponders` if nobody is listening (503), or
-`NatsError.Timeout` if no reply arrives within the timeout:
+`NatsError.Timeout` if no reply arrives within the timeout (5 seconds unless
+overridden); request headers ride along as a parameter:
 
 ```scala mdoc:silent
+import scala.concurrent.duration.*
+
 def echo(client: NatsClient[IO]): IO[NatsMessage] =
   client.request("service.echo", Chunk.array("ping".getBytes))
+
+def echoTuned(client: NatsClient[IO]): IO[NatsMessage] =
+  client.request(
+    "service.echo",
+    Chunk.array("ping".getBytes),
+    headers = Headers("X-Request-Id" -> "abc123"),
+    timeout = 10.seconds
+  )
 ```
+
+The responder side is a plain subscription: a request is a message whose
+`replyTo` is set (`msg.isRequest`), and answering means publishing to that
+subject:
+
+```scala mdoc:silent
+def echoResponder(client: NatsClient[IO]): IO[Unit] =
+  client.subscribe("service.echo").use { requests =>
+    requests.evalMap { req =>
+      req.replyTo match
+        case Some(reply) => client.publish(reply, req.payload)
+        case None        => IO.unit
+    }.compile.drain
+  }
+```
+
+(`publish` also takes a `replyTo` parameter for wiring the pattern manually.)
+For request/reply with typed payloads, typed errors and discovery, see
+[Micro Services](micro.md).
 
 Next up: [JetStream](jetstream.md) for persistence and consumers.

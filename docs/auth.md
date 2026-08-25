@@ -11,7 +11,7 @@ import com.comcast.ip4s.{Host, Port}
 import scala.concurrent.duration.*
 import fs2.io.file.Path
 import fs2.io.net.Network
-import fs2.nats.client.{Backoff, BackoffConfig, ClientConfig, NatsClient, NatsCredentials, SlowConsumerPolicy}
+import fs2.nats.client.{BackoffConfig, ClientConfig, NatsClient, NatsCredentials, ServerAddress, SlowConsumerPolicy}
 
 val host = Host.fromString("nats.example.com").get
 val port = Port.fromInt(4222).get
@@ -41,6 +41,10 @@ val nkeyConfig =
   ClientConfig(host = host, port = port, credentials = Some(NatsCredentials.NKey("SUAB...seed...")))
 ```
 
+`NKey` also takes an optional JWT — `NatsCredentials.NKey(seed, jwt =
+Some(userJwt))` — for operator-mode setups where the JWT and seed come from a
+secrets manager rather than a `.creds` file.
+
 ## Decentralized JWT (`.creds` files)
 
 Operator-mode deployments (NGS / Synadia Cloud / self-hosted with `nsc`) issue a
@@ -55,7 +59,8 @@ def withCreds: IO[Unit] =
   }
 ```
 
-`NatsCredentials.fromCreds(content)` parses an already-loaded string.
+`NatsCredentials.fromCreds(content)` parses an already-loaded string and
+returns `Either[Throwable, NatsCredentials]`.
 
 ## TLS
 
@@ -93,7 +98,7 @@ def mutualTls(sslContext: javax.net.ssl.SSLContext): IO[Unit] =
 
 ## Configuration
 
-`ClientConfig` exposes the full connection surface:
+`ClientConfig` exposes the connection surface:
 
 ```scala mdoc:silent
 val config = ClientConfig(
@@ -113,9 +118,27 @@ val config = ClientConfig(
   slowConsumerPolicy = SlowConsumerPolicy.Block,
   verbose = false,
   pedantic = false,
-  echo = true
+  echo = true,
+  servers = List(                      // additional cluster seed servers
+    ServerAddress(Host.fromString("nats-2.example.com").get, Port.fromInt(4222).get)
+  ),
+  noRandomize = false,                 // true: try servers in configured order
+  reconnectBufferSize = 8L * 1024 * 1024
 )
 ```
+
+### Clustering and reconnect buffering
+
+`servers` seeds the server pool beyond `host`/`port`; peers advertised by the
+cluster via `INFO connect_urls` are added at runtime, and on a lost connection
+the client fails over across the pool (shuffled — keeping the first configured
+seed first — unless `noRandomize` is set).
+`ClientConfig.fromUrls` builds a config from a list of URLs directly.
+
+While disconnected, publishes are buffered up to `reconnectBufferSize` bytes
+(default 8 MiB) and replayed after the reconnect; beyond the limit they fail
+with `NatsError.ReconnectBufferExceeded`. Set it to `0` to fail writes
+immediately instead of buffering.
 
 ### Slow consumer policies
 
@@ -126,20 +149,35 @@ When a subscription queue fills up:
 - `SlowConsumerPolicy.DropOldest` — drop oldest queued messages
 - `SlowConsumerPolicy.ErrorAndDrop` — emit an event and drop
 
-### Backoff strategies
+### Reconnect backoff
+
+Reconnection always uses exponential backoff with full jitter;
+`ClientConfig.backoff` tunes its parameters. Besides the default (100 ms base,
+30 s max, unlimited retries) there are two presets:
 
 ```scala mdoc:silent
-// Exponential backoff with jitter (recommended)
-val policy = Backoff.exponentialWithJitter(
-  base = 100.millis,
-  max = 30.seconds,
-  factor = 2.0,
-  maxRetries = Some(10)
-)
+val quick   = BackoffConfig.fast          // 10ms base, 1s max — for tests
+val patient = BackoffConfig.conservative  // 1s base, 5min max
+```
 
-// Fixed delay
-val fixed = Backoff.fixed(5.seconds, maxRetries = Some(5))
+(The `Backoff` object also offers `fixed`, `immediate` and
+`decorrelatedJitter` policies, but those pair with the general-purpose
+`Retry.withBackoff` utility for retrying your own effects — the client's
+reconnect loop cannot be switched to them.)
 
-// No delay (for testing)
-val immediate = Backoff.immediate(maxRetries = 3)
+### Transport and parser tuning
+
+`NatsClient.connect` takes two further knobs. `TransportConfig` sets
+socket-level behaviour — connect/write timeouts, the outbound write-queue
+capacity, and TCP socket options — with `highThroughput` and `lowLatency`
+presets. `ParserConfig` bounds inbound protocol parsing (control-line length,
+payload limit, strictness):
+
+```scala mdoc:silent
+import fs2.nats.transport.TransportConfig
+
+def tunedConnect: IO[Unit] =
+  NatsClient
+    .connect[IO](config, transportConfig = TransportConfig.highThroughput)
+    .use(_ => IO.unit)
 ```

@@ -89,6 +89,8 @@ lazy val docs = project
   .settings(
     name := "fs2-nats-docs",
     scalaVersion := V.scala3,
+    // micro.md derives jsoniter codecs in its snippets; same scope as in root.
+    libraryDependencies += "com.github.plokhotnyuk.jsoniter-scala" %% "jsoniter-scala-macros" % V.jsoniter % "compile-internal",
     // Read markdown sources from the repo-root `docs/` dir (deterministic; the
     // plugin otherwise inherits MdocPlugin's project-relative `site/docs` default).
     mdocIn := (ThisBuild / baseDirectory).value / "docs",
