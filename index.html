@@ -120,8 +120,8 @@
         <p><code>fs2-nats</code> lets you talk to NATS the functional way. Subscriptions are native
         <code>fs2.Stream</code>s, the client is a <code>Resource</code> that cleans up after itself,
         reconnection and backpressure are built in, and the whole surface — core
-        pub/sub, request/reply, JetStream, Key-Value, and Object Store — stays inside
-        Cats Effect from the first byte to the last. No callbacks, no hidden threads, no
+        pub/sub, request/reply, JetStream, Key-Value, Object Store, and micro
+        services — stays inside Cats Effect from the first byte to the last. No callbacks, no hidden threads, no
         surprises.</p>
         
         <h2 id="highlights" class="section"><a class="anchor-link left" href="#highlights"><i class="icofont-laika link">&#xef71;</i></a>Highlights</h2>
@@ -132,6 +132,7 @@
           <li><strong>JetStream</strong> — streams, consumers, persistent publish (<code>PubAck</code>), pull &amp; push consume with full ack semantics</li>
           <li><strong>Key-Value</strong> — buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch</li>
           <li><strong>Object Store</strong> — large binary objects chunked over JetStream with streaming put/get, SHA-256 verification, links, and watch</li>
+          <li><strong>Micro Services</strong> — typed request/reply endpoints (ADR-32) with compile-time subject patterns, typed errors, discovery, and per-endpoint stats</li>
           <li><strong>Headers</strong> — full NATS 2.2+ headers support (HPUB/HMSG)</li>
           <li><strong>Backpressure</strong> — configurable slow-consumer policies (block / drop / error)</li>
           <li><strong>Reconnection</strong> — exponential backoff with full jitter, automatic subscription replay, and cluster failover</li>
@@ -150,7 +151,7 @@
           <tbody>
             <tr>
               <td><strong>Scala</strong></td>
-              <td>3.3.7 (Scala 3.3 <strong>LTS</strong>)</td>
+              <td>3.3.x (Scala 3.3 <strong>LTS</strong>)</td>
             </tr>
             <tr>
               <td><strong>JDK</strong></td>
@@ -211,10 +212,14 @@
           <li><strong><a href="jetstream.html">JetStream</a></strong> — streams, persistent publish, and pull/push consumers.</li>
           <li><strong><a href="key-value.html">Key-Value Store</a></strong> — buckets, optimistic concurrency, history, and watch.</li>
           <li><strong><a href="object-store.html">Object Store</a></strong> — streaming large binary objects with SHA-256 verification.</li>
+          <li><strong><a href="micro.html">Micro Services</a></strong> — typed request/reply endpoints with discovery and stats.</li>
           <li><strong><a href="auth.html">Authentication &amp; TLS</a></strong> — token, user/password, NKey, <code>.creds</code>, and (mutual) TLS.</li>
         </ul>
         <p>The code examples on every page are compiled against the published API as part
-        of the build, so they stay in step with the library.</p>
+        of the build, so they stay in step with the library. Complete runnable programs
+        for every module live in the
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/tree/main/examples"><code>examples/</code> directory</a>
+        on GitHub, and each feature page links to its example.</p>
 
         
 <hr class="footer-rule"/>

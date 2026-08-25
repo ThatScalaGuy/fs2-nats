@@ -104,6 +104,7 @@
     <li class="level1 nav-leaf"><a href="#wildcard-subscriptions">Wildcard subscriptions</a></li>
     <li class="level1 nav-leaf"><a href="#queue-groups-load-balancing">Queue groups (load balancing)</a></li>
     <li class="level1 nav-leaf"><a href="#connection-events">Connection events</a></li>
+    <li class="level1 nav-leaf"><a href="#inspecting-the-connection">Inspecting the connection</a></li>
     <li class="level1 nav-leaf"><a href="#request-reply">Request/Reply</a></li>
   </ul>
 
@@ -115,7 +116,11 @@
 
         <h1 id="getting-started" class="title">Getting Started</h1>
         <p>This page covers the core pub/sub surface: connecting, publishing, subscribing,
-        wildcards, queue groups, connection events, and request/reply.</p>
+        wildcards, queue groups, connection events, and request/reply. Runnable
+        versions of everything here (plus a request/reply responder and a queue-group
+        demo) are in
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/Basic.scala"><code>Basic.scala</code></a>
+        on GitHub.</p>
         
         <h2 id="prerequisites" class="section"><a class="anchor-link left" href="#prerequisites"><i class="icofont-laika link">&#xef71;</i></a>Prerequisites</h2>
         <p>Start a NATS server:</p>
@@ -149,6 +154,13 @@
       </span><span class="keyword">yield</span><span> ()
     }
   }</span></code></pre>
+        <p>Instead of building <code>Host</code>/<code>Port</code> by hand, <code>ClientConfig.localhost()</code> covers
+        local development and <code>ClientConfig.fromUrl</code> parses <code>nats://host:4222</code> and
+        <code>tls://host:4222</code> URLs (credentials are configured separately — see
+        <a href="auth.html">Authentication &amp; TLS</a>); <code>fromUrls</code> takes a list of cluster seed
+        servers:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">local</span><span>  = </span><span class="type-name">ClientConfig</span><span>.</span><span class="identifier">localhost</span><span>()
+</span><span class="keyword">val</span><span> </span><span class="identifier">parsed</span><span> = </span><span class="type-name">ClientConfig</span><span>.</span><span class="identifier">fromUrl</span><span>(</span><span class="string-literal">&quot;nats://demo.nats.io:4222&quot;</span><span>)</span></code></pre>
         
         <h2 id="publishing-with-headers" class="section"><a class="anchor-link left" href="#publishing-with-headers"><i class="icofont-laika link">&#xef71;</i></a>Publishing with headers</h2>
         <p>NATS 2.2+ headers are first class. Build a <code>Headers</code> value and pass it to
@@ -159,6 +171,12 @@
     </span><span class="string-literal">&quot;X-Timestamp&quot;</span><span>  -&gt; </span><span class="type-name">System</span><span>.</span><span class="identifier">currentTimeMillis</span><span>().</span><span class="identifier">toString</span><span>
   )
   </span><span class="identifier">client</span><span>.</span><span class="identifier">publish</span><span>(</span><span class="string-literal">&quot;events.created&quot;</span><span>, </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;&quot;&quot;{&quot;id&quot;: 1}&quot;&quot;&quot;</span><span>.</span><span class="identifier">getBytes</span><span>), </span><span class="identifier">headers</span><span>)</span></code></pre>
+        <p>On the receiving side, <code>msg.headers</code> reads case-insensitively: <code>get</code> returns
+        the first value, <code>getAll</code> every value of a repeated key. <code>Headers</code> is
+        immutable — <code>add</code> appends a value, <code>set</code> replaces all values of a key, and
+        <code>remove</code> drops it:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">requestId</span><span>(</span><span class="identifier">msg</span><span>: </span><span class="type-name">NatsMessage</span><span>): </span><span class="type-name">Option</span><span>[</span><span class="type-name">String</span><span>] =
+  </span><span class="identifier">msg</span><span>.</span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;x-request-id&quot;</span><span>)</span></code></pre>
         
         <h2 id="wildcard-subscriptions" class="section"><a class="anchor-link left" href="#wildcard-subscriptions"><i class="icofont-laika link">&#xef71;</i></a>Wildcard subscriptions</h2>
         <p><code>*</code> matches a single token; <code>&gt;</code> matches one or more trailing tokens:</p>
@@ -195,13 +213,49 @@
     </span><span class="keyword">case</span><span> </span><span class="identifier">other</span><span> =&gt;
       </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;Event: </span><span class="substitution">$other</span><span class="string-literal">&quot;</span><span>)
   }.</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span></code></pre>
+        <p>Further variants: <code>Reconnecting(attempt, delayMs)</code> before each attempt,
+        <code>ProtocolError(message, fatal)</code>, <code>ServerInfoUpdated(info)</code> on a fresh <code>INFO</code>,
+        <code>LameDuckMode</code> when the server announces it is draining, and
+        <code>MaxReconnectsExceeded(attempts, lastError)</code> when the client gives up.</p>
+        
+        <h2 id="inspecting-the-connection" class="section"><a class="anchor-link left" href="#inspecting-the-connection"><i class="icofont-laika link">&#xef71;</i></a>Inspecting the connection</h2>
+        <p><code>serverInfo</code> exposes the server&#39;s <code>INFO</code> (id, version, <code>maxPayload</code>, whether
+        JetStream and headers are available, ...), and <code>isConnected</code> reports the live
+        connection state:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">payloadLimit</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Long</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">serverInfo</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">maxPayload</span><span>)</span></code></pre>
         
         <h2 id="request-reply" class="section"><a class="anchor-link left" href="#request-reply"><i class="icofont-laika link">&#xef71;</i></a>Request/Reply</h2>
         <p><code>request</code> publishes to a shared response inbox and awaits a single reply. It
         fails fast with <code>NatsError.NoResponders</code> if nobody is listening (503), or
-        <code>NatsError.Timeout</code> if no reply arrives within the timeout:</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">echo</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">NatsMessage</span><span>] =
-  </span><span class="identifier">client</span><span>.</span><span class="identifier">request</span><span>(</span><span class="string-literal">&quot;service.echo&quot;</span><span>, </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;ping&quot;</span><span>.</span><span class="identifier">getBytes</span><span>))</span></code></pre>
+        <code>NatsError.Timeout</code> if no reply arrives within the timeout (5 seconds unless
+        overridden); request headers ride along as a parameter:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">echo</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">NatsMessage</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">request</span><span>(</span><span class="string-literal">&quot;service.echo&quot;</span><span>, </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;ping&quot;</span><span>.</span><span class="identifier">getBytes</span><span>))
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">echoTuned</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">NatsMessage</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">request</span><span>(
+    </span><span class="string-literal">&quot;service.echo&quot;</span><span>,
+    </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;ping&quot;</span><span>.</span><span class="identifier">getBytes</span><span>),
+    </span><span class="identifier">headers</span><span> = </span><span class="type-name">Headers</span><span>(</span><span class="string-literal">&quot;X-Request-Id&quot;</span><span> -&gt; </span><span class="string-literal">&quot;abc123&quot;</span><span>),
+    </span><span class="identifier">timeout</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>
+  )</span></code></pre>
+        <p>The responder side is a plain subscription: a request is a message whose
+        <code>replyTo</code> is set (<code>msg.isRequest</code>), and answering means publishing to that
+        subject:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">echoResponder</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">client</span><span>.</span><span class="identifier">subscribe</span><span>(</span><span class="string-literal">&quot;service.echo&quot;</span><span>).</span><span class="identifier">use</span><span> { </span><span class="identifier">requests</span><span> =&gt;
+    </span><span class="identifier">requests</span><span>.</span><span class="identifier">evalMap</span><span> { </span><span class="identifier">req</span><span> =&gt;
+      </span><span class="identifier">req</span><span>.</span><span class="identifier">replyTo</span><span> </span><span class="keyword">match</span><span>
+        </span><span class="keyword">case</span><span> </span><span class="type-name">Some</span><span>(</span><span class="identifier">reply</span><span>) =&gt; </span><span class="identifier">client</span><span>.</span><span class="identifier">publish</span><span>(</span><span class="identifier">reply</span><span>, </span><span class="identifier">req</span><span>.</span><span class="identifier">payload</span><span>)
+        </span><span class="keyword">case</span><span> </span><span class="type-name">None</span><span>        =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">unit</span><span>
+    }.</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
+  }</span></code></pre>
+        <p>(<code>publish</code> also takes a <code>replyTo</code> parameter for wiring the pattern manually.)
+        For request/reply with typed payloads, typed errors and discovery, see
+        <a href="micro.html">Micro Services</a>.</p>
         <p>Next up: <a href="jetstream.html">JetStream</a> for persistence and consumers.</p>
 
         

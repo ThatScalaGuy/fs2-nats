@@ -99,9 +99,14 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#streams-and-persistent-publish">Streams and persistent publish</a></li>
+    <li class="level1 nav-leaf"><a href="#stream-management">Stream management</a></li>
     <li class="level1 nav-leaf"><a href="#continuous-pull-consumption">Continuous pull consumption</a></li>
     <li class="level1 nav-leaf"><a href="#push-consumption">Push consumption</a></li>
+    <li class="level1 nav-leaf"><a href="#ordered-consumption">Ordered consumption</a></li>
+    <li class="level1 nav-leaf"><a href="#consumer-configuration-and-management">Consumer configuration and management</a></li>
+    <li class="level1 nav-leaf"><a href="#message-metadata">Message metadata</a></li>
     <li class="level1 nav-leaf"><a href="#ack-semantics">Ack semantics</a></li>
+    <li class="level1 nav-leaf"><a href="#errors">Errors</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -112,8 +117,11 @@
 
         <h1 id="jetstream" class="title">JetStream</h1>
         <p>JetStream is obtained as a <code>Resource</code> over a connected client (requires a
-        JetStream-enabled server, e.g. <code>nats-server -js</code>). It owns the publish window
-        and supervised fibers, and releases them with the <code>Resource</code>.</p>
+        JetStream-enabled server, e.g. <code>nats-server -js</code>). It scopes the bounded
+        <code>publishAsync</code> in-flight window; acquisition fails with
+        <code>NatsError.JetStreamNotEnabled</code> if the server has no JetStream. A runnable version of this page is
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/JetStreamExample.scala"><code>JetStreamExample.scala</code></a>
+        on GitHub.</p>
         <p>The snippets below share these imports and helpers:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">syntax</span><span>.</span><span class="identifier">all</span><span>.*
@@ -124,6 +132,11 @@
 </span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">jetstream</span><span>.</span><span class="identifier">protocol</span><span>.*
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">process</span><span>(</span><span class="identifier">payload</span><span>: </span><span class="type-name">Chunk</span><span>[</span><span class="type-name">Byte</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] = </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;got </span><span class="substitution">${payload.size}</span><span class="string-literal"> bytes&quot;</span><span>)</span></code></pre>
+        <p><code>client.jetStream()</code> takes an optional <code>JetStreamConfig</code>: the API prefix and
+        <code>domain</code> for leaf-node setups (a domain routes requests via
+        <code>$JS.&lt;domain&gt;.API.</code> and skips the JetStream-enabled check), the default
+        request <code>timeout</code> (5 seconds), and the <code>publishAsync</code> window size (256):</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">leafConfig</span><span> = </span><span class="type-name">JetStreamConfig</span><span>(</span><span class="identifier">domain</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;hub&quot;</span><span>), </span><span class="identifier">timeout</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>)</span></code></pre>
         
         <h2 id="streams-and-persistent-publish" class="section"><a class="anchor-link left" href="#streams-and-persistent-publish"><i class="icofont-laika link">&#xef71;</i></a>Streams and persistent publish</h2>
         <p>Create a stream, then publish to it with a <code>PubAck</code>. The optional <code>Nats-Msg-Id</code>
@@ -151,14 +164,89 @@
       </span><span class="identifier">_</span><span>    &lt;- </span><span class="identifier">msgs</span><span>.</span><span class="identifier">traverse_</span><span>(</span><span class="identifier">m</span><span> =&gt; </span><span class="identifier">process</span><span>(</span><span class="identifier">m</span><span>.</span><span class="identifier">payload</span><span>) *&gt; </span><span class="identifier">m</span><span>.</span><span class="identifier">ack</span><span>)
     </span><span class="keyword">yield</span><span> ()
   }</span></code></pre>
+        <p><code>StreamConfig</code> goes far beyond name and subjects: retention
+        (<code>Limits</code>/<code>Interest</code>/<code>WorkQueue</code>), storage (<code>File</code>/<code>Memory</code>), limits
+        (<code>maxMsgs</code>, <code>maxBytes</code>, <code>maxAge</code>, <code>maxMsgsPerSubject</code>, ... — <code>-1</code> means
+        unlimited), the discard policy, replication, S2 compression, and the
+        <code>duplicateWindow</code> inside which <code>Nats-Msg-Id</code> de-duplication applies. Mirrors,
+        sources, republish, subject transforms and placement are available as well:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">archiveConfig</span><span> = </span><span class="type-name">StreamConfig</span><span>(
+  </span><span class="identifier">name</span><span> = </span><span class="string-literal">&quot;ORDERS-ARCHIVE&quot;</span><span>,
+  </span><span class="identifier">subjects</span><span> = </span><span class="type-name">List</span><span>(</span><span class="string-literal">&quot;orders.&gt;&quot;</span><span>),
+  </span><span class="identifier">retention</span><span> = </span><span class="type-name">RetentionPolicy</span><span>.</span><span class="type-name">Limits</span><span>,
+  </span><span class="identifier">storage</span><span> = </span><span class="type-name">StorageType</span><span>.</span><span class="type-name">File</span><span>,
+  </span><span class="identifier">maxAge</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">30</span><span>.</span><span class="identifier">days</span><span>),
+  </span><span class="identifier">maxMsgsPerSubject</span><span> = </span><span class="number-literal">1000</span><span>,
+  </span><span class="identifier">discard</span><span> = </span><span class="type-name">DiscardPolicy</span><span>.</span><span class="type-name">Old</span><span>,
+  </span><span class="identifier">replicas</span><span> = </span><span class="number-literal">1</span><span>,
+  </span><span class="identifier">compression</span><span> = </span><span class="type-name">StoreCompression</span><span>.</span><span class="type-name">S2</span><span>,
+  </span><span class="identifier">duplicateWindow</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">2</span><span>.</span><span class="identifier">minutes</span><span>)
+)</span></code></pre>
+        <p><code>PublishOptions</code> also carries the optimistic-concurrency preconditions — the
+        publish is rejected unless the stream, its last sequence, the last sequence on
+        this subject, or the last <code>Nats-Msg-Id</code> match — plus a per-publish <code>timeout</code>:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">casPublish</span><span>(</span><span class="identifier">js</span><span>: </span><span class="type-name">JetStream</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="identifier">lastSeq</span><span>: </span><span class="type-name">Long</span><span>): </span><span class="type-name">IO</span><span>[</span><span class="type-name">PubAck</span><span>] =
+  </span><span class="identifier">js</span><span>.</span><span class="identifier">publish</span><span>(
+    </span><span class="string-literal">&quot;orders.new&quot;</span><span>,
+    </span><span class="type-name">Chunk</span><span>.</span><span class="identifier">array</span><span>(</span><span class="string-literal">&quot;order #2&quot;</span><span>.</span><span class="identifier">getBytes</span><span>),
+    </span><span class="identifier">opts</span><span> = </span><span class="type-name">PublishOptions</span><span>(
+      </span><span class="identifier">expectedStream</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>),
+      </span><span class="identifier">expectedLastSubjectSeq</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="identifier">lastSeq</span><span>)
+    )
+  )</span></code></pre>
+        <p>For high throughput, <code>publishAsync</code> pipelines instead of awaiting each ack:
+        the outer effect completes once a window slot is taken and the request is on
+        the wire, the inner one yields the <code>PubAck</code>. The window
+        (<code>JetStreamConfig.publishAsyncMaxPending</code>, default 256) bounds unacknowledged
+        publishes:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">firehose</span><span>(</span><span class="identifier">js</span><span>: </span><span class="type-name">JetStream</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="identifier">payloads</span><span>: </span><span class="type-name">List</span><span>[</span><span class="type-name">Chunk</span><span>[</span><span class="type-name">Byte</span><span>]]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">List</span><span>[</span><span class="type-name">PubAck</span><span>]] =
+  </span><span class="identifier">payloads</span><span>
+    .</span><span class="identifier">traverse</span><span>(</span><span class="identifier">p</span><span> =&gt; </span><span class="identifier">js</span><span>.</span><span class="identifier">publishAsync</span><span>(</span><span class="string-literal">&quot;orders.new&quot;</span><span>, </span><span class="identifier">p</span><span>))  </span><span class="comment">// all on the wire
+</span><span>    .</span><span class="identifier">flatMap</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">sequence</span><span>)                              </span><span class="comment">// then await the acks</span></code></pre>
+        
+        <h2 id="stream-management" class="section"><a class="anchor-link left" href="#stream-management"><i class="icofont-laika link">&#xef71;</i></a>Stream management</h2>
+        <p>The context covers the full stream admin surface — update, inspect, delete,
+        purge (all messages, by subject filter, up to a sequence, or keeping the last
+        <code>n</code>), and paginated listing:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">streamAdmin</span><span>(</span><span class="identifier">js</span><span>: </span><span class="type-name">JetStream</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">updateStream</span><span>(</span><span class="identifier">archiveConfig</span><span>)
+    </span><span class="identifier">info</span><span>  &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">streamInfo</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>)
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${info.state.messages}</span><span class="string-literal"> messages, </span><span class="substitution">${info.state.bytes}</span><span class="string-literal"> bytes&quot;</span><span>)
+    </span><span class="identifier">purged</span><span> &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">purgeStream</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>, </span><span class="type-name">PurgeOptions</span><span>(</span><span class="identifier">filter</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;orders.cancelled&quot;</span><span>)))
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;purged </span><span class="substitution">${purged.purged}</span><span class="string-literal">&quot;</span><span>)
+    </span><span class="identifier">names</span><span> &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">streamNames</span><span>.</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;streams: </span><span class="substitution">${names.mkString(&quot;, &quot;)}</span><span class="string-literal">&quot;</span><span>)
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">deleteStream</span><span>(</span><span class="string-literal">&quot;ORDERS-ARCHIVE&quot;</span><span>)
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <p>Individual stored messages are accessible without a consumer — by sequence or
+        last-on-subject — and can be deleted (erased by default):</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">inspectMessage</span><span>(</span><span class="identifier">js</span><span>: </span><span class="type-name">JetStream</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">msg</span><span> &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">getMessage</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>, </span><span class="type-name">MessageGet</span><span>.</span><span class="type-name">LastBySubject</span><span>(</span><span class="string-literal">&quot;orders.new&quot;</span><span>))
+    </span><span class="identifier">_</span><span>   &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;seq=</span><span class="substitution">${msg.seq}</span><span class="string-literal">: </span><span class="substitution">${msg.data.size}</span><span class="string-literal"> bytes&quot;</span><span>)
+    </span><span class="identifier">_</span><span>   &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">deleteMessage</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>, </span><span class="identifier">msg</span><span>.</span><span class="identifier">seq</span><span>)
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <p><code>js.accountInfo</code> reports account-level usage and limits (<code>maxMemory</code>,
+        <code>maxStorage</code>, <code>maxStreams</code>, <code>maxConsumers</code>; <code>-1</code> = unlimited).</p>
         
         <h2 id="continuous-pull-consumption" class="section"><a class="anchor-link left" href="#continuous-pull-consumption"><i class="icofont-laika link">&#xef71;</i></a>Continuous pull consumption</h2>
-        <p><code>consume</code> owns a background pull loop as part of the <code>Resource</code>; it re-issues its
-        request on a cadence so it resumes after a dropped connection:</p>
+        <p><code>consume</code> runs a pull loop alongside the returned stream — the <code>Resource</code> owns
+        the reply-inbox subscription, and no pulls are issued until the stream is
+        actually consumed. The loop re-issues its request on a cadence so it resumes
+        after a dropped connection. <code>ConsumeOptions</code> tunes the batching: messages (or
+        bytes) per pull request, how long a request stays open (<code>expires</code>, 30 seconds),
+        and the idle heartbeat:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">consumeLoop</span><span>(</span><span class="identifier">c</span><span>: </span><span class="type-name">JsConsumer</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
-  </span><span class="identifier">c</span><span>.</span><span class="identifier">consume</span><span>().</span><span class="identifier">use</span><span> { </span><span class="identifier">stream</span><span> =&gt;
+  </span><span class="identifier">c</span><span>.</span><span class="identifier">consume</span><span>(</span><span class="type-name">ConsumeOptions</span><span>(</span><span class="identifier">maxMessages</span><span> = </span><span class="number-literal">100</span><span>, </span><span class="identifier">expires</span><span> = </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>)).</span><span class="identifier">use</span><span> { </span><span class="identifier">stream</span><span> =&gt;
     </span><span class="identifier">stream</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">m</span><span> =&gt; </span><span class="identifier">process</span><span>(</span><span class="identifier">m</span><span>.</span><span class="identifier">payload</span><span>) *&gt; </span><span class="identifier">m</span><span>.</span><span class="identifier">ack</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
   }</span></code></pre>
+        <p>Besides the blocking <code>fetch(batch, maxWait)</code>, <code>fetchNoWait(batch)</code> returns
+        only what is already buffered server-side — an empty <code>Chunk</code> when there is
+        nothing — which makes polling without a deadline cheap. A handle to an
+        existing, pre-provisioned consumer (its existence is verified) comes from
+        <code>js.consumer(stream, name)</code>; the handle also exposes <code>stream</code>, <code>name</code> and
+        <code>info</code> (delivered/ack-floor sequences, pending counts, redeliveries).</p>
         
         <h2 id="push-consumption" class="section"><a class="anchor-link left" href="#push-consumption"><i class="icofont-laika link">&#xef71;</i></a>Push consumption</h2>
         <p>Durable or ephemeral, with an optional queue group. Idle heartbeats are filtered
@@ -173,6 +261,60 @@
       .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">m</span><span> =&gt; </span><span class="identifier">process</span><span>(</span><span class="identifier">m</span><span>.</span><span class="identifier">payload</span><span>) *&gt; </span><span class="identifier">m</span><span>.</span><span class="identifier">ack</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>)
   }</span></code></pre>
         
+        <h2 id="ordered-consumption" class="section"><a class="anchor-link left" href="#ordered-consumption"><i class="icofont-laika link">&#xef71;</i></a>Ordered consumption</h2>
+        <p><code>subscribeOrdered</code> is the third consumption mode: gap-free, in-order delivery
+        without acks. The client tracks the consumer sequence and transparently
+        recreates its ephemeral flow-controlled consumer from the last in-order stream
+        sequence whenever it detects a gap or the server invalidates the consumer — so
+        ordering survives reconnects. (KV watch and Object Store reads are built on
+        it.) <code>OrderedConsumerOptions</code> selects the start position (<code>deliverPolicy</code>,
+        <code>optStartSeq</code>/<code>optStartTime</code>) and heartbeat/inactivity tuning:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">auditLog</span><span>(</span><span class="identifier">js</span><span>: </span><span class="type-name">JetStream</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">js</span><span>.</span><span class="identifier">subscribeOrdered</span><span>(
+      </span><span class="string-literal">&quot;ORDERS&quot;</span><span>,
+      </span><span class="identifier">filterSubject</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;orders.&gt;&quot;</span><span>),
+      </span><span class="identifier">opts</span><span> = </span><span class="type-name">OrderedConsumerOptions</span><span>(</span><span class="identifier">deliverPolicy</span><span> = </span><span class="type-name">DeliverPolicy</span><span>.</span><span class="type-name">New</span><span>)
+    )
+    .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">evalMap</span><span>(</span><span class="identifier">m</span><span> =&gt; </span><span class="identifier">process</span><span>(</span><span class="identifier">m</span><span>.</span><span class="identifier">payload</span><span>)).</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>)</span></code></pre>
+        
+        <h2 id="consumer-configuration-and-management" class="section"><a class="anchor-link left" href="#consumer-configuration-and-management"><i class="icofont-laika link">&#xef71;</i></a>Consumer configuration and management</h2>
+        <p><code>ConsumerConfig</code> controls far more than the durable name and filter: where to
+        start (<code>DeliverPolicy.All</code>/<code>Last</code>/<code>New</code>/<code>ByStartSequence</code>/<code>ByStartTime</code>/
+        <code>LastPerSubject</code>), how to ack (<code>AckPolicy.Explicit</code>/<code>All</code>/<code>None</code>), redelivery
+        (<code>ackWait</code>, <code>maxDeliver</code>, per-attempt <code>backoff</code> delays), multiple subject
+        filters (<code>filterSubjects</code>), replay pacing (<code>ReplayPolicy.Instant</code>/<code>Original</code>),
+        <code>headersOnly</code>, and flow limits (<code>maxAckPending</code>, <code>maxWaiting</code>). A consumer is
+        pull-based unless <code>deliverSubject</code> is set:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">retryingWorkers</span><span> = </span><span class="type-name">ConsumerConfig</span><span>(
+  </span><span class="identifier">durable</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="string-literal">&quot;workers-v2&quot;</span><span>),
+  </span><span class="identifier">filterSubjects</span><span> = </span><span class="type-name">List</span><span>(</span><span class="string-literal">&quot;orders.new&quot;</span><span>, </span><span class="string-literal">&quot;orders.updated&quot;</span><span>),
+  </span><span class="identifier">ackWait</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>),
+  </span><span class="identifier">maxDeliver</span><span> = </span><span class="number-literal">5</span><span>,
+  </span><span class="identifier">backoff</span><span> = </span><span class="type-name">List</span><span>(</span><span class="number-literal">1</span><span>.</span><span class="identifier">second</span><span>, </span><span class="number-literal">10</span><span>.</span><span class="identifier">seconds</span><span>, </span><span class="number-literal">1</span><span>.</span><span class="identifier">minute</span><span>),
+  </span><span class="identifier">maxAckPending</span><span> = </span><span class="number-literal">500</span><span>
+)</span></code></pre>
+        <p>Consumer admin mirrors the stream admin — create/update/inspect/delete plus
+        paginated listing:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">consumerAdmin</span><span>(</span><span class="identifier">js</span><span>: </span><span class="type-name">JetStream</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">_</span><span>    &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">addConsumer</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>, </span><span class="identifier">retryingWorkers</span><span>)
+    </span><span class="identifier">info</span><span> &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">consumerInfo</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>, </span><span class="string-literal">&quot;workers-v2&quot;</span><span>)
+    </span><span class="identifier">_</span><span>    &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;pending=</span><span class="substitution">${info.numPending}</span><span class="string-literal"> redelivered=</span><span class="substitution">${info.numRedelivered}</span><span class="string-literal">&quot;</span><span>)
+    </span><span class="identifier">all</span><span>  &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">listConsumers</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>).</span><span class="identifier">compile</span><span>.</span><span class="identifier">toList</span><span>
+    </span><span class="identifier">_</span><span>    &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${all.size}</span><span class="string-literal"> consumers on ORDERS&quot;</span><span>)
+    </span><span class="identifier">_</span><span>    &lt;- </span><span class="identifier">js</span><span>.</span><span class="identifier">deleteConsumer</span><span>(</span><span class="string-literal">&quot;ORDERS&quot;</span><span>, </span><span class="string-literal">&quot;workers-v2&quot;</span><span>)
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        
+        <h2 id="message-metadata" class="section"><a class="anchor-link left" href="#message-metadata"><i class="icofont-laika link">&#xef71;</i></a>Message metadata</h2>
+        <p>Every delivered <code>JsMessage</code> exposes <code>subject</code>, <code>headers</code>, <code>payload</code> — and
+        <code>metadata</code>, parsed from the ack-reply subject: stream and consumer sequences,
+        delivery count, pending count and the stored timestamp. <code>numDelivered &gt; 1</code>
+        (<code>isRedelivery</code>) is the hook for dedup and poison-message handling:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">handle</span><span>(</span><span class="identifier">m</span><span>: </span><span class="type-name">JsMessage</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="keyword">if</span><span> </span><span class="identifier">m</span><span>.</span><span class="identifier">metadata</span><span>.</span><span class="identifier">isRedelivery</span><span> &amp;&amp; </span><span class="identifier">m</span><span>.</span><span class="identifier">metadata</span><span>.</span><span class="identifier">numDelivered</span><span> &gt; </span><span class="number-literal">3</span><span>
+  </span><span class="keyword">then</span><span> </span><span class="identifier">m</span><span>.</span><span class="identifier">term</span><span>
+  </span><span class="keyword">else</span><span> </span><span class="identifier">process</span><span>(</span><span class="identifier">m</span><span>.</span><span class="identifier">payload</span><span>) *&gt; </span><span class="identifier">m</span><span>.</span><span class="identifier">ack</span></code></pre>
+        
         <h2 id="ack-semantics" class="section"><a class="anchor-link left" href="#ack-semantics"><i class="icofont-laika link">&#xef71;</i></a>Ack semantics</h2>
         <p>Each delivered <code>JsMessage</code> carries the acks:</p>
         <ul>
@@ -186,6 +328,14 @@
         <p><strong>Reconnect:</strong> push and pull subscriptions ride the client&#39;s automatic
         subscription replay on reconnect; the pull <code>consume</code> loop additionally re-issues
         its request on a cadence so it resumes after a dropped connection.</p>
+        
+        <h2 id="errors" class="section"><a class="anchor-link left" href="#errors"><i class="icofont-laika link">&#xef71;</i></a>Errors</h2>
+        <p>Every JetStream API call can raise <code>NatsError.JetStreamApiError(code, errCode,
+description)</code> — the server&#39;s error envelope with its HTTP-like code and
+        JetStream-specific <code>err_code</code>. Two more cases matter in practice:
+        <code>JetStreamNotEnabled</code> when <code>client.jetStream()</code> is acquired against a server
+        without JetStream, and <code>JetStreamPublishNoAck(subject)</code> when a publish goes to
+        a subject no stream captures (mapped from the no-responders reply).</p>
         <p>Built on JetStream: <a href="key-value.html">Key-Value</a> and <a href="object-store.html">Object Store</a>.</p>
 
         

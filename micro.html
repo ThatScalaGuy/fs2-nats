@@ -101,6 +101,9 @@
     <li class="level1 nav-leaf"><a href="#shared-endpoint-definitions">Shared endpoint definitions</a></li>
     <li class="level1 nav-leaf"><a href="#server-side">Server side</a></li>
     <li class="level1 nav-leaf"><a href="#client-side">Client side</a></li>
+    <li class="level1 nav-leaf"><a href="#domain-types-in-subject-captures">Domain types in subject captures</a></li>
+    <li class="level1 nav-leaf"><a href="#json-payloads-and-custom-codecs">JSON payloads and custom codecs</a></li>
+    <li class="level1 nav-leaf"><a href="#typed-errors">Typed errors</a></li>
     <li class="level1 nav-leaf"><a href="#headers">Headers</a></li>
     <li class="level1 nav-leaf"><a href="#error-semantics">Error semantics</a></li>
     <li class="level1 nav-node"><a href="#discovery">Discovery</a></li>
@@ -122,6 +125,13 @@
         is described once as a plain <code>Rpc</code> value — subject pattern, request/response
         payloads, typed error — and the same value is interpreted by the server
         (<code>NatsService</code>) and the client (<code>Micro</code>).</p>
+        <p>Two runnable examples accompany this page:
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/MicroExample.scala"><code>MicroExample.scala</code></a>
+        covers the basics;
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/MicroAdvancedExample.scala"><code>MicroAdvancedExample.scala</code></a>
+        runs everything from the advanced sections below — domain-typed captures, JSON
+        payloads, a typed error ADT, schemas, metadata and headers — against a live
+        server.</p>
         <p>The snippets below share these imports:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.{</span><span class="type-name">IO</span><span>, </span><span class="type-name">Ref</span><span>}
 </span><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">syntax</span><span>.</span><span class="identifier">all</span><span>.*
@@ -151,9 +161,10 @@
     </span><span class="identifier">err</span><span> = </span><span class="type-name">ServiceErr</span><span>.</span><span class="identifier">plain</span><span>,
     </span><span class="identifier">out</span><span> = </span><span class="type-name">Payload</span><span>.</span><span class="identifier">string</span><span>
   )</span></code></pre>
-        <p><code>Payload</code> provides <code>empty</code>, <code>bytes</code>, <code>string</code> and <code>json</code> (jsoniter);
+        <p><code>Payload</code> provides <code>empty</code>, <code>bytes</code>, <code>string</code> and <code>json</code> (jsoniter), plus
+        <code>from</code>/<code>imap</code> for anything else — see the JSON payloads section below.
         <code>ServiceErr.plain</code> passes the raw <code>(code, description)</code> pair through — map it to
-        your own error ADT with <code>ServiceErr.from</code>.</p>
+        your own error ADT with <code>ServiceErr.from</code>, covered in the typed errors section.</p>
         
         <h2 id="server-side" class="section"><a class="anchor-link left" href="#server-side"><i class="icofont-laika link">&#xef71;</i></a>Server side</h2>
         <p>Attach logic with <code>handle</code> (or <code>handleWithHeaders</code> to read the request headers
@@ -176,6 +187,17 @@
     </span><span class="type-name">NatsService</span><span>(</span><span class="identifier">client</span><span>, </span><span class="type-name">ServiceConfig</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>, </span><span class="string-literal">&quot;1.0.0&quot;</span><span>), </span><span class="identifier">handlers</span><span>)
       .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span> =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">never</span><span>)
   }</span></code></pre>
+        <p><code>ServiceConfig</code> carries more than name and version: <code>withDescription</code> sets the
+        human-readable description shown by <code>nats micro info</code>, and <code>withMaxConcurrent</code>
+        bounds how many handlers may run at once <em>per endpoint</em> (default 64) — further
+        requests wait on the subscription until a slot frees up:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">tunedConfig</span><span> = </span><span class="type-name">ServiceConfig</span><span>(</span><span class="string-literal">&quot;orders&quot;</span><span>, </span><span class="string-literal">&quot;1.0.0&quot;</span><span>)
+  .</span><span class="identifier">withDescription</span><span>(</span><span class="string-literal">&quot;order management&quot;</span><span>)
+  .</span><span class="identifier">withMaxConcurrent</span><span>(</span><span class="number-literal">16</span><span>)</span></code></pre>
+        <p><code>NatsService(...)</code> validates its inputs during acquisition and raises
+        <code>IllegalArgumentException</code> on violations: service and endpoint names must match
+        <code>[A-Za-z0-9-_]+</code>, the version must be SemVer, and the handler list must be
+        non-empty with unique endpoint names.</p>
         
         <h2 id="client-side" class="section"><a class="anchor-link left" href="#client-side"><i class="icofont-laika link">&#xef71;</i></a>Client side</h2>
         <p><code>Micro.call</code> fills the captures into the subject and decodes the reply. There
@@ -187,6 +209,103 @@
     </span><span class="identifier">found</span><span> &lt;- </span><span class="identifier">micro</span><span>.</span><span class="identifier">call</span><span>(</span><span class="type-name">OrdersApi</span><span>.</span><span class="identifier">get</span><span>)(</span><span class="identifier">added</span><span>.</span><span class="identifier">getOrElse</span><span>(</span><span class="string-literal">&quot;1&quot;</span><span>))
     </span><span class="identifier">_</span><span>     &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;add: </span><span class="substitution">$added</span><span class="string-literal">, get: </span><span class="substitution">$found</span><span class="string-literal">&quot;</span><span>)
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <p>Calls time out after 5 seconds by default; <code>call</code> and <code>callWithHeaders</code> take a
+        <code>timeout</code> parameter to override that per call:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">slowAdd</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Either</span><span>[(</span><span class="type-name">Int</span><span>, </span><span class="type-name">String</span><span>), </span><span class="type-name">String</span><span>]] =
+  </span><span class="type-name">Micro</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">call</span><span>(</span><span class="type-name">OrdersApi</span><span>.</span><span class="identifier">add</span><span>)((), </span><span class="string-literal">&quot;1x espresso&quot;</span><span>, </span><span class="identifier">timeout</span><span> = </span><span class="number-literal">30</span><span>.</span><span class="identifier">seconds</span><span>)</span></code></pre>
+        <p>On a <code>Payload.empty</code> endpoint the parameterless sugar always wins overload
+        resolution, so there the deadline comes from <code>callWithHeaders</code> (pass
+        <code>Headers.empty</code> if you have nothing to send — see the headers section).</p>
+        <p>A call that misses its deadline raises <code>NatsError.Timeout</code> in <code>F</code> (see error
+        semantics below).</p>
+        
+        <h2 id="domain-types-in-subject-captures" class="section"><a class="anchor-link left" href="#domain-types-in-subject-captures"><i class="icofont-laika link">&#xef71;</i></a>Domain types in subject captures</h2>
+        <p><code>bind</code> accepts any type with a <code>TokenCodec</code> — instances for <code>String</code>, <code>Int</code>,
+        <code>Long</code> and <code>java.util.UUID</code> are provided. Wrap them with <code>imap</code> (or build one
+        from scratch with <code>TokenCodec.from</code>) to carry domain types instead of raw
+        strings; a pattern with 2–4 captures binds the matching tuple:</p>
+        <pre><code class="nohighlight"><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">TenantId</span><span>(</span><span class="identifier">value</span><span>: </span><span class="type-name">String</span><span>)
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">OrderId</span><span>(</span><span class="identifier">value</span><span>: </span><span class="type-name">Long</span><span>)
+
+</span><span class="keyword">object</span><span> </span><span class="type-name">ShopIds</span><span>:
+  </span><span class="keyword">given</span><span> </span><span class="type-name">TokenCodec</span><span>[</span><span class="type-name">TenantId</span><span>] = </span><span class="type-name">TokenCodec</span><span>.</span><span class="identifier">string</span><span>.</span><span class="identifier">imap</span><span>(</span><span class="type-name">TenantId</span><span>.</span><span class="identifier">apply</span><span>)(</span><span class="identifier">_</span><span>.</span><span class="identifier">value</span><span>)
+  </span><span class="keyword">given</span><span> </span><span class="type-name">TokenCodec</span><span>[</span><span class="type-name">OrderId</span><span>]  = </span><span class="type-name">TokenCodec</span><span>.</span><span class="identifier">long</span><span>.</span><span class="identifier">imap</span><span>(</span><span class="type-name">OrderId</span><span>.</span><span class="identifier">apply</span><span>)(</span><span class="identifier">_</span><span>.</span><span class="identifier">value</span><span>)
+
+</span><span class="keyword">import</span><span> </span><span class="type-name">ShopIds</span><span>.</span><span class="keyword">given</span><span>
+
+</span><span class="comment">/** shop.&lt;tenant&gt;.orders.get.&lt;id&gt; — two captures decode to a tuple. */</span><span>
+</span><span class="keyword">val</span><span> </span><span class="identifier">getForTenant</span><span> = </span><span class="type-name">Rpc</span><span>(
+  </span><span class="identifier">name</span><span> = </span><span class="string-literal">&quot;get-for-tenant&quot;</span><span>,
+  </span><span class="identifier">subject</span><span> = </span><span class="identifier">pattern</span><span>[</span><span class="string-literal">&quot;shop.*.orders.get.*&quot;</span><span>].</span><span class="identifier">bind</span><span>[(</span><span class="type-name">TenantId</span><span>, </span><span class="type-name">OrderId</span><span>)],
+  </span><span class="identifier">in</span><span> = </span><span class="type-name">Payload</span><span>.</span><span class="identifier">empty</span><span>,
+  </span><span class="identifier">err</span><span> = </span><span class="type-name">ServiceErr</span><span>.</span><span class="identifier">plain</span><span>,
+  </span><span class="identifier">out</span><span> = </span><span class="type-name">Payload</span><span>.</span><span class="identifier">string</span><span>
+)
+
+</span><span class="keyword">def</span><span> </span><span class="declaration-name">find</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Either</span><span>[(</span><span class="type-name">Int</span><span>, </span><span class="type-name">String</span><span>), </span><span class="type-name">String</span><span>]] =
+  </span><span class="type-name">Micro</span><span>(</span><span class="identifier">client</span><span>).</span><span class="identifier">call</span><span>(</span><span class="identifier">getForTenant</span><span>)((</span><span class="type-name">TenantId</span><span>(</span><span class="string-literal">&quot;acme&quot;</span><span>), </span><span class="type-name">OrderId</span><span>(</span><span class="number-literal">1</span><span>)))</span></code></pre>
+        <p>A request whose token does not decode — <code>shop.acme.orders.get.oops</code> here,
+        since <code>oops</code> is no <code>Long</code> — is answered with a <code>400</code> before any handler runs.</p>
+        
+        <h2 id="json-payloads-and-custom-codecs" class="section"><a class="anchor-link left" href="#json-payloads-and-custom-codecs"><i class="icofont-laika link">&#xef71;</i></a>JSON payloads and custom codecs</h2>
+        <p><code>Payload.json[A]</code> serializes with jsoniter-scala. It summons a
+        <code>JsonValueCodec[A]</code>, which you derive with <code>JsonCodecMaker.make</code> — add the
+        macros to your build; <code>compile-internal</code> keeps them off your runtime classpath:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="identifier">libraryDependencies</span><span> +=
+  </span><span class="string-literal">&quot;com.github.plokhotnyuk.jsoniter-scala&quot;</span><span> %% </span><span class="string-literal">&quot;jsoniter-scala-macros&quot;</span><span> % </span><span class="string-literal">&quot;2.40.1&quot;</span><span> % </span><span class="string-literal">&quot;compile-internal&quot;</span></code></pre>
+        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">github</span><span>.</span><span class="identifier">plokhotnyuk</span><span>.</span><span class="identifier">jsoniter_scala</span><span>.</span><span class="identifier">core</span><span>.</span><span class="type-name">JsonValueCodec</span><span>
+</span><span class="keyword">import</span><span> </span><span class="identifier">com</span><span>.</span><span class="identifier">github</span><span>.</span><span class="identifier">plokhotnyuk</span><span>.</span><span class="identifier">jsoniter_scala</span><span>.</span><span class="identifier">macros</span><span>.</span><span class="type-name">JsonCodecMaker</span><span>
+
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">AddOrder</span><span>(</span><span class="identifier">item</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">quantity</span><span>: </span><span class="type-name">Int</span><span>)
+</span><span class="keyword">final</span><span> </span><span class="keyword">case</span><span> </span><span class="keyword">class</span><span> </span><span class="type-name">Order</span><span>(</span><span class="identifier">id</span><span>: </span><span class="type-name">Long</span><span>, </span><span class="identifier">item</span><span>: </span><span class="type-name">String</span><span>, </span><span class="identifier">quantity</span><span>: </span><span class="type-name">Int</span><span>)
+
+</span><span class="keyword">object</span><span> </span><span class="type-name">ShopJson</span><span>:
+  </span><span class="keyword">given</span><span> </span><span class="type-name">JsonValueCodec</span><span>[</span><span class="type-name">AddOrder</span><span>] = </span><span class="type-name">JsonCodecMaker</span><span>.</span><span class="identifier">make</span><span>
+  </span><span class="keyword">given</span><span> </span><span class="type-name">JsonValueCodec</span><span>[</span><span class="type-name">Order</span><span>]    = </span><span class="type-name">JsonCodecMaker</span><span>.</span><span class="identifier">make</span><span>
+
+</span><span class="keyword">import</span><span> </span><span class="type-name">ShopJson</span><span>.</span><span class="keyword">given</span><span>
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">addTyped</span><span> = </span><span class="type-name">Rpc</span><span>(
+  </span><span class="identifier">name</span><span> = </span><span class="string-literal">&quot;add-typed&quot;</span><span>,
+  </span><span class="identifier">subject</span><span> = </span><span class="identifier">pattern</span><span>[</span><span class="string-literal">&quot;orders.add-typed&quot;</span><span>],
+  </span><span class="identifier">in</span><span> = </span><span class="type-name">Payload</span><span>.</span><span class="identifier">json</span><span>[</span><span class="type-name">AddOrder</span><span>],
+  </span><span class="identifier">err</span><span> = </span><span class="type-name">ServiceErr</span><span>.</span><span class="identifier">plain</span><span>,
+  </span><span class="identifier">out</span><span> = </span><span class="type-name">Payload</span><span>.</span><span class="identifier">json</span><span>[</span><span class="type-name">Order</span><span>]
+)</span></code></pre>
+        <p>jsoniter is not required, though: a <code>Payload</code> is just an encode/decode pair
+        over <code>Chunk[Byte]</code>, so any serialization plugs in via <code>Payload.from(enc, dec)</code>,
+        and <code>imap</code> refines an existing codec — its decode side may reject:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">val</span><span> </span><span class="identifier">intPayload</span><span>: </span><span class="type-name">Payload</span><span>[</span><span class="type-name">Int</span><span>] =
+  </span><span class="type-name">Payload</span><span>.</span><span class="identifier">string</span><span>.</span><span class="identifier">imap</span><span>(</span><span class="identifier">s</span><span> =&gt; </span><span class="identifier">s</span><span>.</span><span class="identifier">toIntOption</span><span>.</span><span class="identifier">toRight</span><span>(</span><span class="string-literal">s&quot;not an int: &#39;</span><span class="substitution">$s</span><span class="string-literal">&#39;&quot;</span><span>))(</span><span class="identifier">_</span><span>.</span><span class="identifier">toString</span><span>)</span></code></pre>
+        
+        <h2 id="typed-errors" class="section"><a class="anchor-link left" href="#typed-errors"><i class="icofont-laika link">&#xef71;</i></a>Typed errors</h2>
+        <p><code>ServiceErr.plain</code> exposes errors as the raw <code>(Int, String)</code> pair. A shared API
+        usually wants an ADT both sides pattern-match on; <code>ServiceErr.from</code> maps
+        between the two. Only the code and description travel on the wire, and <code>decode</code>
+        must be total — give it a catch-all case for codes this version of the client
+        does not know:</p>
+        <pre><code class="nohighlight"><span class="keyword">enum</span><span> </span><span class="type-name">OrderError</span><span>:
+  </span><span class="keyword">case</span><span> </span><span class="type-name">NotFound</span><span>(</span><span class="identifier">description</span><span>: </span><span class="type-name">String</span><span>)
+  </span><span class="keyword">case</span><span> </span><span class="type-name">InvalidQuantity</span><span>(</span><span class="identifier">description</span><span>: </span><span class="type-name">String</span><span>)
+  </span><span class="keyword">case</span><span> </span><span class="type-name">Unknown</span><span>(</span><span class="identifier">code</span><span>: </span><span class="type-name">Int</span><span>, </span><span class="identifier">description</span><span>: </span><span class="type-name">String</span><span>)
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">orderErr</span><span>: </span><span class="type-name">ServiceErr</span><span>[</span><span class="type-name">OrderError</span><span>] = </span><span class="type-name">ServiceErr</span><span>.</span><span class="identifier">from</span><span>(
+  </span><span class="identifier">encode</span><span> = {
+    </span><span class="keyword">case</span><span> </span><span class="type-name">OrderError</span><span>.</span><span class="type-name">NotFound</span><span>(</span><span class="identifier">d</span><span>)        =&gt; (</span><span class="number-literal">404</span><span>, </span><span class="identifier">d</span><span>)
+    </span><span class="keyword">case</span><span> </span><span class="type-name">OrderError</span><span>.</span><span class="type-name">InvalidQuantity</span><span>(</span><span class="identifier">d</span><span>) =&gt; (</span><span class="number-literal">422</span><span>, </span><span class="identifier">d</span><span>)
+    </span><span class="keyword">case</span><span> </span><span class="type-name">OrderError</span><span>.</span><span class="type-name">Unknown</span><span>(</span><span class="identifier">code</span><span>, </span><span class="identifier">d</span><span>)   =&gt; (</span><span class="identifier">code</span><span>, </span><span class="identifier">d</span><span>)
+  },
+  </span><span class="identifier">decode</span><span> = (</span><span class="identifier">code</span><span>, </span><span class="identifier">description</span><span>) =&gt;
+    </span><span class="identifier">code</span><span> </span><span class="keyword">match</span><span>
+      </span><span class="keyword">case</span><span> </span><span class="number-literal">404</span><span>   =&gt; </span><span class="type-name">OrderError</span><span>.</span><span class="type-name">NotFound</span><span>(</span><span class="identifier">description</span><span>)
+      </span><span class="keyword">case</span><span> </span><span class="number-literal">422</span><span>   =&gt; </span><span class="type-name">OrderError</span><span>.</span><span class="type-name">InvalidQuantity</span><span>(</span><span class="identifier">description</span><span>)
+      </span><span class="keyword">case</span><span> </span><span class="identifier">other</span><span> =&gt; </span><span class="type-name">OrderError</span><span>.</span><span class="type-name">Unknown</span><span>(</span><span class="identifier">other</span><span>, </span><span class="identifier">description</span><span>)
+)</span></code></pre>
+        <p>An endpoint defined with <code>err = orderErr</code> hands its handlers
+        <code>Left(OrderError.NotFound(...))</code> and returns the same value to callers — no
+        exceptions involved on either side.</p>
         
         <h2 id="headers" class="section"><a class="anchor-link left" href="#headers"><i class="icofont-laika link">&#xef71;</i></a>Headers</h2>
         <p>NATS message headers pass through the typed layer untouched, in both
@@ -226,6 +345,14 @@
           <li>A handler exception becomes a <code>500</code> with the exception message; a request
           whose subject captures or payload do not decode is answered with <code>400</code> before
           the handler runs.</li>
+          <li>The error description is sanitized before publishing: only the first line
+          survives, remaining control characters are blanked, and it is capped at 256
+          characters — long or multi-line messages arrive truncated at the client.</li>
+          <li>A throwing codec cannot kill an endpoint: a request <code>decode</code> that throws is
+          answered with <code>400</code>, a response or error <code>encode</code> that throws becomes a
+          <code>500</code>, and a failed reply publish is swallowed but recorded in the endpoint&#39;s
+          stats. A request without a reply subject is processed, but no reply is
+          published.</li>
           <li>The client raises in <code>F</code> only transport failures — <code>NatsError.Timeout</code>,
           <code>NatsError.NoResponders</code> (no instance subscribed) and
           <code>NatsError.PayloadDecodeError</code> (a success reply whose body does not decode) —
@@ -237,7 +364,9 @@
         <p>Every instance answers the ADR-32 discovery subjects <code>$SRV.PING</code>, <code>$SRV.INFO</code>
         and <code>$SRV.STATS</code> — each in the bare form, suffixed with the service name, and
         suffixed with <code>&lt;name&gt;.&lt;id&gt;</code> — with the standard <code>io.nats.micro.v1.*</code> JSON
-        responses. Any plain request works, e.g. <code>nats req &#39;$SRV.PING&#39; &#39;&#39;</code> or the
+        responses. The instance id in that last form is available locally as
+        <code>NatsService#id</code>, e.g. to target one specific instance or correlate logs with
+        discovery output. Any plain request works, e.g. <code>nats req &#39;$SRV.PING&#39; &#39;&#39;</code> or the
         <code>nats micro</code> CLI. <code>INFO</code> lists the endpoints with their wildcard subjects,
         queue groups and metadata.</p>
         
@@ -282,20 +411,34 @@
         one.</p>
         
         <h2 id="stats-and-reset" class="section"><a class="anchor-link left" href="#stats-and-reset"><i class="icofont-laika link">&#xef71;</i></a>Stats and reset</h2>
-        <p>The <code>NatsService</code> handle exposes the same data locally: <code>info</code>, <code>stats</code>
-        (per-endpoint request/error counters, last error, processing times) and <code>reset</code>
-        (zero all counters and re-stamp <code>started</code>):</p>
+        <p>The <code>NatsService</code> handle exposes the same data locally: <code>info</code>, <code>stats</code> and
+        <code>reset</code> (zero all counters and re-stamp <code>started</code>). Each <code>EndpointStats</code>
+        carries <code>name</code>, <code>subject</code>, <code>queueGroup</code>, the <code>numRequests</code>/<code>numErrors</code>
+        counters, the <code>lastError</code> description, and total and average processing times
+        as <code>FiniteDuration</code>:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">printStats</span><span>(</span><span class="identifier">svc</span><span>: </span><span class="type-name">NatsService</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
   </span><span class="identifier">svc</span><span>.</span><span class="identifier">stats</span><span>.</span><span class="identifier">flatMap</span><span> { </span><span class="identifier">s</span><span> =&gt;
-    </span><span class="identifier">s</span><span>.</span><span class="identifier">endpoints</span><span>.</span><span class="identifier">traverse_</span><span> { </span><span class="identifier">e</span><span> =&gt;
-      </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${e.name}</span><span class="string-literal">: </span><span class="substitution">${e.numRequests}</span><span class="string-literal"> requests, </span><span class="substitution">${e.numErrors}</span><span class="string-literal"> errors&quot;</span><span>)
-    }
+    </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${s.name}</span><span class="string-literal"> (</span><span class="substitution">${s.id}</span><span class="string-literal">) up since </span><span class="substitution">${s.started}</span><span class="string-literal">&quot;</span><span>) *&gt;
+      </span><span class="identifier">s</span><span>.</span><span class="identifier">endpoints</span><span>.</span><span class="identifier">traverse_</span><span> { </span><span class="identifier">e</span><span> =&gt;
+        </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(
+          </span><span class="string-literal">s&quot;</span><span class="substitution">${e.name}</span><span class="string-literal"> @ </span><span class="substitution">${e.subject}</span><span class="string-literal">: </span><span class="substitution">${e.numRequests}</span><span class="string-literal"> requests, &quot;</span><span> +
+            </span><span class="string-literal">s&quot;</span><span class="substitution">${e.numErrors}</span><span class="string-literal"> errors (last: </span><span class="substitution">${e.lastError.getOrElse(&quot;-&quot;)}</span><span class="string-literal">), &quot;</span><span> +
+            </span><span class="string-literal">s&quot;avg </span><span class="substitution">${e.averageProcessingTime.toMicros}</span><span class="string-literal">µs&quot;</span><span>
+        )
+      }
   }</span></code></pre>
         
         <h2 id="notes" class="section"><a class="anchor-link left" href="#notes"><i class="icofont-laika link">&#xef71;</i></a>Notes</h2>
         <ul>
           <li>Subject patterns support at most 4 captures: 1 capture binds any <code>A</code> with a
-          <code>TokenCodec</code>, 2–4 captures bind <code>Tuple2</code>..<code>Tuple4</code>.</li>
+          <code>TokenCodec</code>, 2–4 captures bind <code>Tuple2</code>..<code>Tuple4</code>. The <code>pattern</code> macro
+          rejects empty tokens, whitespace, wildcards embedded in a token and a
+          non-final <code>&gt;</code> — all at compile time. <code>SubjectPattern#render</code> returns the
+          original wildcard literal, e.g. for logging.</li>
+          <li>On the client, params are encoded back into subject tokens; a <code>*</code> capture
+          whose encoded token is empty or contains <code>.</code>, whitespace, <code>*</code> or <code>&gt;</code> raises
+          <code>IllegalArgumentException</code> before anything is published. A <code>&gt;</code> tail may
+          contain dots (it spans multiple tokens); only an empty tail is rejected.</li>
           <li>Endpoints join queue group <code>&quot;q&quot;</code> by default (per ADR-32), so multiple
           instances load-balance automatically. Override per service with
           <code>ServiceConfig.withQueueGroup</code> or per endpoint with <code>Rpc.withQueueGroup</code>.</li>

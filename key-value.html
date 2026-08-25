@@ -99,8 +99,9 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#put-get-and-optimistic-concurrency">Put, get, and optimistic concurrency</a></li>
+    <li class="level1 nav-leaf"><a href="#history-and-point-in-time-reads">History and point-in-time reads</a></li>
     <li class="level1 nav-leaf"><a href="#watch">Watch</a></li>
-    <li class="level1 nav-leaf"><a href="#bucket-management">Bucket management</a></li>
+    <li class="level1 nav-leaf"><a href="#bucket-configuration-and-management">Bucket configuration and management</a></li>
   </ul>
 
   <p class="footer"></p>
@@ -114,7 +115,10 @@
         <code>$KV.&lt;bucket&gt;.&gt;</code>). KV handles are obtained from the JetStream context. Reads use
         JetStream <strong>Direct Get</strong> when the bucket allows it (<code>allowDirect</code>, the default),
         so a <code>get</code> returns the raw message payload with no JSON/base64 decoding on the
-        hot path; writes ride the JetStream publish/coalescing window.</p>
+        hot path; writes ride the JetStream publish/coalescing window. A runnable
+        version of this page is
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/KeyValueExample.scala"><code>KeyValueExample.scala</code></a>
+        on GitHub.</p>
         <p>The snippets below share these imports and helpers:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="type-name">Chunk</span><span>
@@ -151,6 +155,25 @@
         <p><code>create</code> (fails if the key exists) and <code>update</code> raise
         <code>NatsError.KeyValueWrongLastSequence</code> when their optimistic-concurrency
         precondition fails.</p>
+        <p>A <code>KvEntry</code> carries more than the value: its <code>revision</code>, <code>created</code> timestamp,
+        <code>delta</code> (distance from the latest revision — <code>0</code> means current) and
+        <code>operation</code> (<code>Put</code>, or the <code>Delete</code>/<code>Purge</code> tombstones).</p>
+        <p>For pipelined writes, <code>putAsync</code> returns nested effects: the outer one
+        completes once the publish is on the wire, the inner one yields the revision.</p>
+        
+        <h2 id="history-and-point-in-time-reads" class="section"><a class="anchor-link left" href="#history-and-point-in-time-reads"><i class="icofont-laika link">&#xef71;</i></a>History and point-in-time reads</h2>
+        <p>With <code>history &gt; 1</code> the bucket retains up to that many revisions per key
+        (server limit: 64). <code>history(key)</code> lists them oldest-first, and <code>get</code> with a
+        revision reads one directly. <code>delete</code> writes a tombstone on top; <code>purge</code>
+        instead collapses the key&#39;s whole history into a single <code>Purge</code> marker:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">kvHistory</span><span>(</span><span class="identifier">kv</span><span>: </span><span class="type-name">KeyValue</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="keyword">for</span><span>
+    </span><span class="identifier">revs</span><span> &lt;- </span><span class="identifier">kv</span><span>.</span><span class="identifier">history</span><span>(</span><span class="string-literal">&quot;db.url&quot;</span><span>)
+    </span><span class="identifier">_</span><span>    &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="identifier">revs</span><span>.</span><span class="identifier">map</span><span>(</span><span class="identifier">e</span><span> =&gt; </span><span class="string-literal">s&quot;</span><span class="substitution">${e.revision}</span><span class="string-literal">: </span><span class="substitution">${e.operation}</span><span class="string-literal">&quot;</span><span>).</span><span class="identifier">mkString</span><span>(</span><span class="string-literal">&quot;, &quot;</span><span>))
+    </span><span class="identifier">entry</span><span> &lt;- </span><span class="identifier">kv</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;db.url&quot;</span><span>, </span><span class="identifier">revision</span><span> = </span><span class="identifier">revs</span><span>.</span><span class="identifier">head</span><span>.</span><span class="identifier">revision</span><span>)
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;first revision: </span><span class="substitution">${entry.map(_.value.size)}</span><span class="string-literal"> bytes&quot;</span><span>)
+    </span><span class="identifier">_</span><span>     &lt;- </span><span class="identifier">kv</span><span>.</span><span class="identifier">purge</span><span>(</span><span class="string-literal">&quot;legacy&quot;</span><span>)
+  </span><span class="keyword">yield</span><span> ()</span></code></pre>
         
         <h2 id="watch" class="section"><a class="anchor-link left" href="#watch"><i class="icofont-laika link">&#xef71;</i></a>Watch</h2>
         <p>Watch delivers the current entries, then a single <code>KvWatchEvent.EndOfData</code>
@@ -162,13 +185,44 @@
       </span><span class="keyword">case</span><span> </span><span class="type-name">KvWatchEvent</span><span>.</span><span class="type-name">EndOfData</span><span> =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">&quot;caught up&quot;</span><span>)
     }.</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>
   }</span></code></pre>
+        <p>The first argument is a key pattern and accepts the NATS wildcards <code>*</code> and
+        <code>&gt;</code> — <code>watch(&quot;config.&gt;&quot;)</code> follows a subtree, <code>watchAll()</code> is shorthand for the
+        whole bucket. <code>WatchOptions</code> refines the delivery: <code>includeHistory</code> replays
+        every retained revision, <code>updatesOnly</code> skips the initial snapshot (and takes
+        precedence over <code>includeHistory</code> if both are set), <code>ignoreDeletes</code> drops the
+        <code>Delete</code>/<code>Purge</code> tombstones,
+        and <code>metaOnly</code> delivers entries without their values:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">kvUpdates</span><span>(</span><span class="identifier">kv</span><span>: </span><span class="type-name">KeyValue</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
+  </span><span class="identifier">kv</span><span>.</span><span class="identifier">watch</span><span>(</span><span class="string-literal">&quot;config.&gt;&quot;</span><span>, </span><span class="type-name">WatchOptions</span><span>(</span><span class="identifier">updatesOnly</span><span> = </span><span class="boolean-literal">true</span><span>, </span><span class="identifier">ignoreDeletes</span><span> = </span><span class="boolean-literal">true</span><span>))
+    .</span><span class="identifier">use</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">compile</span><span>.</span><span class="identifier">drain</span><span>)</span></code></pre>
         <p><code>keys</code>/<code>history</code>/<code>watch</code> stream from a gap-resetting <strong>ordered consumer</strong>, so a
         reconnect mid-watch recovers in order rather than missing updates.</p>
         
-        <h2 id="bucket-management" class="section"><a class="anchor-link left" href="#bucket-management"><i class="icofont-laika link">&#xef71;</i></a>Bucket management</h2>
+        <h2 id="bucket-configuration-and-management" class="section"><a class="anchor-link left" href="#bucket-configuration-and-management"><i class="icofont-laika link">&#xef71;</i></a>Bucket configuration and management</h2>
+        <p><code>KvConfig</code> exposes the bucket options beyond <code>history</code>: a per-entry <code>ttl</code>,
+        <code>storage</code> (<code>File</code>/<code>Memory</code>), size limits (<code>maxBytes</code>, <code>maxValueSize</code> — <code>-1</code>
+        means unlimited), <code>replicas</code>, S2 <code>compression</code>, and <code>allowDirect</code> (disable it
+        to route reads through <code>STREAM.MSG.GET</code> instead of Direct Get):</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">jetstream</span><span>.</span><span class="identifier">protocol</span><span>.{</span><span class="type-name">StorageType</span><span>, </span><span class="type-name">StoreCompression</span><span>}
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">sessionsConfig</span><span> = </span><span class="type-name">KvConfig</span><span>(
+  </span><span class="identifier">bucket</span><span> = </span><span class="string-literal">&quot;sessions&quot;</span><span>,
+  </span><span class="identifier">history</span><span> = </span><span class="number-literal">1</span><span>,
+  </span><span class="identifier">ttl</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">30</span><span>.</span><span class="identifier">minutes</span><span>),
+  </span><span class="identifier">storage</span><span> = </span><span class="type-name">StorageType</span><span>.</span><span class="type-name">Memory</span><span>,
+  </span><span class="identifier">maxValueSize</span><span> = </span><span class="number-literal">64</span><span> * </span><span class="number-literal">1024</span><span>,
+  </span><span class="identifier">compression</span><span> = </span><span class="type-name">StoreCompression</span><span>.</span><span class="type-name">S2</span><span>
+)</span></code></pre>
         <p>Bucket management lives on the JetStream context: <code>createKeyValue</code>, <code>keyValue</code>
-        (bind to an existing bucket), <code>deleteKeyValue</code>, <code>keyValueStatus</code>, and
-        <code>keyValueNames</code>.</p>
+        (bind to an existing bucket), <code>deleteKeyValue</code> (destroys the bucket and its
+        data), <code>keyValueStatus</code>, and <code>keyValueNames</code> (a <code>Stream</code> of bucket names). The
+        handle itself reports its bucket via <code>kv.bucket</code> and its live state via
+        <code>kv.status</code> — a <code>KvStatus</code> with the value count, retained history depth, TTL,
+        total bytes, storage type and replica count.</p>
+        <p>Bucket names must match <code>[A-Za-z0-9_-]+</code>; keys may contain alphanumerics and
+        <code>-/_=.</code> but must not start or end with a dot. Invalid names fail with
+        <code>NatsError.InvalidSubject</code>.</p>
         <p>Next: the <a href="object-store.html">Object Store</a> for large binary objects.</p>
 
         

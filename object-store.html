@@ -99,6 +99,7 @@
 
   <ul class="nav-list">
     <li class="level1 nav-leaf"><a href="#streaming-put-and-get">Streaming put and get</a></li>
+    <li class="level1 nav-leaf"><a href="#bucket-configuration">Bucket configuration</a></li>
     <li class="level1 nav-leaf"><a href="#links-rename-list-watch-and-seal">Links, rename, list, watch, and seal</a></li>
   </ul>
 
@@ -114,7 +115,9 @@
         meta). It stores arbitrarily large binary objects by chunking them across the
         stream, with a rolled-up meta message recording each object&#39;s size, chunk count,
         and SHA-256 digest. Both <code>put</code> and <code>get</code> are fully streaming — neither
-        materializes a whole object in memory.</p>
+        materializes a whole object in memory. A runnable version of this page is
+        <a href="https://github.com/ThatScalaGuy/fs2-nats/blob/main/examples/ObjectStoreExample.scala"><code>ObjectStoreExample.scala</code></a>
+        on GitHub.</p>
         <p>The snippets below share these imports and helpers:</p>
         <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">cats</span><span>.</span><span class="identifier">effect</span><span>.</span><span class="type-name">IO</span><span>
 </span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="type-name">Chunk</span><span>
@@ -136,7 +139,7 @@
 
       </span><span class="comment">// Stream bytes in (here from a file); nothing is buffered whole.
 </span><span>      </span><span class="identifier">info</span><span> &lt;- </span><span class="identifier">os</span><span>.</span><span class="identifier">put</span><span>(
-                </span><span class="type-name">ObjectMeta</span><span>(</span><span class="string-literal">&quot;logo.png&quot;</span><span>, </span><span class="identifier">maxChunkSize</span><span> = </span><span class="number-literal">128</span><span> * </span><span class="number-literal">1024</span><span>),
+                </span><span class="type-name">ObjectMeta</span><span>(</span><span class="string-literal">&quot;logo.png&quot;</span><span>),
                 </span><span class="type-name">Files</span><span>[</span><span class="type-name">IO</span><span>].</span><span class="identifier">readAll</span><span>(</span><span class="type-name">Path</span><span>(</span><span class="string-literal">&quot;logo.png&quot;</span><span>))
               )
 
@@ -155,12 +158,54 @@
       </span><span class="identifier">_</span><span>   &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;stored </span><span class="substitution">${info.size}</span><span class="string-literal"> bytes; readme present=</span><span class="substitution">${txt.isDefined}</span><span class="string-literal">&quot;</span><span>)
     </span><span class="keyword">yield</span><span> ()
   }</span></code></pre>
+        <p>Chunks default to 128 KiB (<code>ObjConfig.DefaultChunkSize</code>); override per object
+        via <code>ObjectMeta.maxChunkSize</code>. <code>ObjectMeta</code> also carries a <code>description</code> and a
+        free-form <code>metadata</code> map, both stored with the object. Putting under an
+        existing name replaces the object — the previous chunks are purged once the
+        new meta is durable; there is no versioning. Note the digest is only verified
+        when the data stream is read to its end — a consumer that stops early skips
+        the check. On a full read with a mismatch, the stream fails with
+        <code>NatsError.ObjectDigestMismatch</code>.</p>
+        <p>Every write and read returns or resolves to an <code>ObjectInfo</code>: <code>size</code>, <code>chunks</code>,
+        the <code>digest</code> (<code>SHA-256=&lt;url-base64&gt;</code>), <code>deleted</code> flag, <code>modified</code> timestamp,
+        your description/metadata, and the <code>link</code> field for link entries. <code>info(name)</code>
+        fetches it without downloading anything — <code>None</code> if the object is absent or
+        deleted:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">exists</span><span>(</span><span class="identifier">os</span><span>: </span><span class="type-name">ObjectStore</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="identifier">name</span><span>: </span><span class="type-name">String</span><span>): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Boolean</span><span>] =
+  </span><span class="identifier">os</span><span>.</span><span class="identifier">info</span><span>(</span><span class="identifier">name</span><span>).</span><span class="identifier">map</span><span>(</span><span class="identifier">_</span><span>.</span><span class="identifier">isDefined</span><span>)</span></code></pre>
+        <p><code>updateMeta(name, meta)</code> rewrites description/metadata in place (and renames,
+        if <code>meta.name</code> differs) without re-uploading data.</p>
+        
+        <h2 id="bucket-configuration" class="section"><a class="anchor-link left" href="#bucket-configuration"><i class="icofont-laika link">&#xef71;</i></a>Bucket configuration</h2>
+        <p><code>ObjConfig</code> covers the bucket options: <code>description</code>, a <code>ttl</code> for object
+        expiry, <code>maxBytes</code>, <code>storage</code> (<code>File</code>/<code>Memory</code>), <code>replicas</code>, <code>compression</code>
+        (S2 <strong>by default</strong> — trades CPU for storage and needs NATS Server 2.10+), and
+        <code>allowDirect</code> for the meta fast-read path:</p>
+        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">scala</span><span>.</span><span class="identifier">concurrent</span><span>.</span><span class="identifier">duration</span><span>.*
+</span><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">jetstream</span><span>.</span><span class="identifier">protocol</span><span>.</span><span class="type-name">StoreCompression</span><span>
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">cacheConfig</span><span> = </span><span class="type-name">ObjConfig</span><span>(
+  </span><span class="identifier">bucket</span><span> = </span><span class="string-literal">&quot;render-cache&quot;</span><span>,
+  </span><span class="identifier">ttl</span><span> = </span><span class="type-name">Some</span><span>(</span><span class="number-literal">7</span><span>.</span><span class="identifier">days</span><span>),
+  </span><span class="identifier">maxBytes</span><span> = </span><span class="number-literal">10L</span><span> * </span><span class="number-literal">1024</span><span> * </span><span class="number-literal">1024</span><span> * </span><span class="number-literal">1024</span><span>,
+  </span><span class="identifier">compression</span><span> = </span><span class="type-name">StoreCompression</span><span>.</span><span class="type-name">None</span><span>
+)</span></code></pre>
+        <p>Bucket names must match <code>[A-Za-z0-9_-]+</code>. Object names are nearly free-form
+        (slashes, dots and spaces are fine — the meta subject token is URL-safe
+        base64) but limited to 190 UTF-8 bytes.</p>
         
         <h2 id="links-rename-list-watch-and-seal" class="section"><a class="anchor-link left" href="#links-rename-list-watch-and-seal"><i class="icofont-laika link">&#xef71;</i></a>Links, rename, list, watch, and seal</h2>
-        <p>Objects support links (<code>addLink</code> / <code>addBucketLink</code>, transparently resolved on
-        <code>get</code>/<code>info</code>), metadata updates and <code>rename</code> (no re-upload), <code>delete</code>, <code>list</code>,
-        <code>watch</code> (snapshot + <code>EndOfData</code> + live updates), and <code>seal</code> (make the bucket
-        read-only):</p>
+        <p><code>addLink(linkName, target)</code> stores a pointer to another object — the target is
+        the resolved <code>ObjectInfo</code>, not a name — and <code>get</code>/<code>info</code> follow it
+        transparently. Linking to a deleted object raises <code>NatsError.ObjectNotFound</code>;
+        linking to a link raises <code>NatsError.ObjectIsLink</code>. <code>addBucketLink(linkName,
+target)</code> takes a bucket handle and records a pointer to a whole bucket; it is
+        <em>not</em> resolved — reading it
+        returns the link entry itself, whose <code>ObjectLink</code> has <code>name = None</code>.</p>
+        <p>The admin surface: <code>rename</code> (no re-upload), <code>delete</code> (tombstones the meta and
+        purges the object&#39;s chunks, reclaiming storage; <code>ObjectNotFound</code> if already
+        gone), <code>list</code>, <code>watch</code> (snapshot + <code>EndOfData</code> + live updates), and <code>seal</code>
+        (make the bucket read-only):</p>
         <pre><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">objectStoreAdmin</span><span>(</span><span class="identifier">os</span><span>: </span><span class="type-name">ObjectStore</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
   </span><span class="keyword">for</span><span>
     </span><span class="identifier">_</span><span>    &lt;- </span><span class="identifier">os</span><span>.</span><span class="identifier">rename</span><span>(</span><span class="string-literal">&quot;old.txt&quot;</span><span>, </span><span class="string-literal">&quot;new.txt&quot;</span><span>)       </span><span class="comment">// no re-upload
@@ -174,11 +219,20 @@
     </span><span class="identifier">_</span><span>    &lt;- </span><span class="identifier">os</span><span>.</span><span class="identifier">seal</span><span>                                </span><span class="comment">// make the bucket read-only
 </span><span>    </span><span class="identifier">_</span><span>    &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${list.size}</span><span class="string-literal"> live objects&quot;</span><span>)
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
+        <p>In a <code>watch</code>, deletions arrive as <code>Update</code> events with <code>info.deleted = true</code>
+        (the initial snapshot includes tombstones — unlike <code>list</code>, which filters
+        them), and an empty bucket emits <code>EndOfData</code> immediately.</p>
         <p>Reads of object meta use the JetStream <strong>Direct Get</strong> fast path when the bucket
         allows it; chunk reads use the gap-resetting ordered consumer, so a <code>get</code>
         recovers in order across a reconnect. Bucket management lives on the JetStream
-        context: <code>createObjectStore</code>, <code>objectStore</code>, <code>deleteObjectStore</code>,
-        <code>objectStoreStatus</code>, <code>objectStoreNames</code>.</p>
+        context: <code>createObjectStore</code>, <code>objectStore</code> (bind to an existing bucket),
+        <code>deleteObjectStore</code>, <code>objectStoreStatus</code>, and <code>objectStoreNames</code> (a <code>Stream</code>
+        of bucket names). The handle itself exposes <code>os.bucket</code> and <code>os.status</code> — an
+        <code>ObjStatus</code> with description, TTL, storage type, replicas, total size, and
+        <code>isSealed</code>.</p>
+        <p>Operations raise typed errors from <code>NatsError</code>: <code>ObjectNotFound</code>,
+        <code>ObjectAlreadyExists</code> (e.g. renaming onto an existing name), <code>ObjectIsLink</code>,
+        and <code>ObjectDigestMismatch</code>.</p>
         <p>See also <a href="auth.html">Authentication &amp; TLS</a> to secure the connection.</p>
 
         
