@@ -107,3 +107,50 @@ class OrderedConsumerIntegrationSpec extends CatsEffectSuite:
       yield assertEquals(got, (1 to 10).map(i => s"m$i").toList)
     }
   }
+
+  test(
+    "ordered consumer stays in order across two consecutive recreates"
+  ) {
+    val name = uniqueName
+    withJs(name) { js =>
+      val subject = s"$name.obj"
+      val opts = OrderedConsumerOptions(idleHeartbeat = 1.second)
+      // Delete whatever consumer is currently delivering, out-of-band, so the
+      // next batch can only arrive through a transparent recreate. Counts what
+      // it deleted: if a heal has not landed yet there is nothing to kill, the
+      // recreate this call was meant to force never happens, and the test would
+      // otherwise still pass having exercised one cycle instead of two.
+      val killLive: IO[Long] = js
+        .consumerNames(name)
+        .evalMap(js.deleteConsumer(name, _))
+        .compile
+        .count
+      for
+        _ <- publishRange(js, subject, 1 to 5)
+        r <- js.subscribeOrdered(name, Some(subject), opts).use { s =>
+          for
+            fiber <- s.map(_.payloadAsString).take(15).compile.toList.start
+            _ <- IO.sleep(1.second)
+            killed1 <- killLive
+            _ <- publishRange(js, subject, 6 to 10)
+            // Wait for the first heal to complete and drain before killing
+            // again: the second cycle is the one that exercises a recreate
+            // whose resume sequence and cycle counter come from a state the
+            // *previous* recreate wrote.
+            _ <- IO.sleep(3.seconds)
+            killed2 <- killLive
+            _ <- publishRange(js, subject, 11 to 15)
+            res <- fiber.joinWithNever.timeout(30.seconds)
+          yield (res, killed1, killed2)
+        }
+        // The resource finalizer must delete the consumer of the *last* cycle,
+        // not a name captured before the recreates.
+        left <- js.consumerNames(name).compile.toList
+      yield
+        val (got, killed1, killed2) = r
+        assert(killed1 > 0, "first kill deleted nothing — no recreate forced")
+        assert(killed2 > 0, "second kill deleted nothing — only one recreate")
+        assertEquals(got, (1 to 15).map(i => s"m$i").toList)
+        assertEquals(left, Nil)
+    }
+  }

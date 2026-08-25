@@ -38,7 +38,7 @@ import fs2.nats.util.Tokens
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 
 import java.time.Instant
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 
 import scala.concurrent.duration.*
 
@@ -236,6 +236,15 @@ object JetStream:
       ApiSubjects(config.apiPrefix, config.domain),
       window
     )
+
+  /** Sentinel merged into an ordered consumer's delivery stream to drive its
+    * liveness check. Compared by reference identity (`eq`), so delivered
+    * messages need not be boxed in an `Option` just to carry an out-of-band
+    * tick -- the same trick `SubscriptionManager.PoisonPill` uses for
+    * end-of-stream.
+    */
+  private val LivenessTick: NatsMessage =
+    NatsMessage("", None, Headers.empty, Chunk.empty, -1L)
 
   private final class JetStreamImpl[F[_]: Async](
       client: NatsClient[F],
@@ -528,11 +537,19 @@ object JetStream:
         // Subscribe before creating the consumer so no early delivery is lost.
         delivery <- client.subscribe(inbox)
         state <- Resource.eval(
-          Ref.of[F, OrderedState](OrderedState(1L, 0L, 0L))
+          Ref.of[F, OrderedState](OrderedState(1L, 0L, 0L, ""))
         )
-        nameRef <- Resource.eval(Ref.of[F, String](""))
         now0 <- Resource.eval(F.monotonic)
-        lastSeen <- Resource.eval(Ref.of[F, FiniteDuration](now0))
+        // Liveness timestamp, monotonic nanos. Held as a plain AtomicLong
+        // rather than a Ref because refreshing it is on the per-message path: a
+        // Ref costs a second effect node built and run for every delivery,
+        // where this is one volatile store inside a continuation the runtime
+        // re-enters anyway. Written only by the delivery loop and read only by
+        // the liveness tick, both of which run on the same sequential pull, so
+        // the mutation is not observable as a side effect through the pure API
+        // -- same reasoning as InternalSubscription's state in
+        // SubscriptionManager.
+        lastSeen = new AtomicLong(now0.toNanos)
         first <- Resource.make(
           addConsumer(
             stream,
@@ -544,10 +561,11 @@ object JetStream:
               opts.optStartSeq,
               opts.optStartTime
             )
-          ).flatTap(info => nameRef.set(info.name))
+          ).flatTap(info => state.update(_.copy(consumer = info.name)))
         )(_ =>
-          nameRef.get.flatMap(n =>
-            if n.nonEmpty then deleteConsumer(stream, n).attempt.void
+          state.get.flatMap(st =>
+            if st.consumer.nonEmpty then
+              deleteConsumer(stream, st.consumer).attempt.void
             else F.unit
           )
         )
@@ -565,84 +583,95 @@ object JetStream:
                   None
                 )
               else (opts.deliverPolicy, opts.optStartSeq, opts.optStartTime)
-            nameRef.get.flatMap { old =>
-              (if old.nonEmpty then deleteConsumer(stream, old).attempt.void
-               else F.unit) *>
-                addConsumer(
-                  stream,
-                  orderedConfig(filterSubject, opts, inbox, dp, oss, ost)
-                ).flatMap { info =>
-                  nameRef.set(info.name) *>
-                    state.set(OrderedState(1L, st.lastStreamSeq, st.cycle + 1))
-                }
-            }
+            (if st.consumer.nonEmpty then
+               deleteConsumer(stream, st.consumer).attempt.void
+             else F.unit) *>
+              addConsumer(
+                stream,
+                orderedConfig(filterSubject, opts, inbox, dp, oss, ost)
+              ).flatMap { info =>
+                // One store, not two: the new name and the reset counters
+                // become visible together, so no reader can pair a name from
+                // this cycle with counters from the last one. That closes a
+                // torn read only a *concurrent* reader could have observed —
+                // what makes this whole `get`/await/await/`set` span safe today
+                // is still that ticks are merged into the delivery stream, so
+                // recreate and the delivery loop are the same sequential pull.
+                // A liveness fiber would have to bring its own mutual
+                // exclusion; this blind `set` is not it.
+                state.set(
+                  OrderedState(1L, st.lastStreamSeq, st.cycle + 1, info.name)
+                )
+              }
           }
 
         // Liveness: the server emits idle heartbeats every `idleHeartbeat` while
         // the consumer is alive, so a silence longer than a couple of intervals
         // means the consumer was lost (e.g. deleted/expired after a reconnect) —
-        // recreate it. Ticks are merged into the delivery stream and handled by
-        // the same sequential pull, so no extra synchronization is needed.
-        val livenessTimeout = opts.idleHeartbeat * 2 + 1.second
-        val ticks =
-          Stream.awakeEvery[F](opts.idleHeartbeat).as(Option.empty[NatsMessage])
+        // recreate it. Ticks arrive as a reference-identity sentinel merged
+        // into the delivery stream and are handled by the same sequential pull,
+        // so no extra synchronization is needed.
+        val livenessTimeoutNanos = (opts.idleHeartbeat * 2 + 1.second).toNanos
+        val ticks = Stream.awakeEvery[F](opts.idleHeartbeat).as(LivenessTick)
 
         val onMessage: NatsMessage => F[Option[JsMessage[F]]] = m =>
-          F.monotonic.flatMap(lastSeen.set) *> (
+          F.monotonic.flatMap { now =>
+            lastSeen.set(now.toNanos)
             PushStatus.classify(m.status, m.replyTo, m.statusDescription) match
-              case PushSignal.Data =>
-                handleOrderedData(m, state, nameRef, recreate)
-              case PushSignal.Heartbeat          => F.pure(None)
+              case PushSignal.Data      => handleOrderedData(m, state, recreate)
+              case PushSignal.Heartbeat => F.pure(None)
               case PushSignal.FlowControl(reply) =>
                 client.publish(reply, Chunk.empty).as(None)
               // A deleted/expired consumer surfaces as a terminal status; heal
               // it rather than failing the stream.
               case PushSignal.Fail(_, _) => recreate.as(None)
-          )
+          }
 
         val livenessCheck: F[Unit] =
-          (F.monotonic, lastSeen.get).flatMapN { (now, seen) =>
-            if now - seen > livenessTimeout then
-              recreate *> F.monotonic.flatMap(lastSeen.set)
+          F.monotonic.flatMap { now =>
+            if now.toNanos - lastSeen.get() > livenessTimeoutNanos then
+              // Stored bare, like the refresh in `onMessage`: both run inside a
+              // `flatMap` continuation the runtime enters exactly once per
+              // effect, so wrapping either in `F.delay` would only buy a second
+              // effect node.
+              recreate *> F.monotonic.flatMap { n =>
+                lastSeen.set(n.toNanos)
+                F.unit
+              }
             else F.unit
           }
 
         val ordered =
-          delivery.map(Option(_)).mergeHaltL(ticks).evalMapFilter {
-            case Some(m) => onMessage(m)
-            case None    => livenessCheck.as(None)
+          delivery.mergeHaltL(ticks).evalMapFilter { m =>
+            if m eq LivenessTick then
+              livenessCheck.as(Option.empty[JsMessage[F]])
+            else onMessage(m)
           }
         (first, ordered)
 
     private def handleOrderedData(
         m: NatsMessage,
         state: Ref[F, OrderedState],
-        nameRef: Ref[F, String],
         recreate: F[Unit]
     ): F[Option[JsMessage[F]]] =
       buildJsMessage(m).flatMap { jm =>
         val meta = jm.metadata
-        (nameRef.get, state.get).flatMapN { (curName, st) =>
-          // Drop deliveries from a previous cycle (arriving after a recreate).
-          if meta.consumer != curName then F.pure(None)
-          else
-            OrderedConsumer.decide(
-              st.expectedConsumerSeq,
-              st.lastStreamSeq,
-              meta.consumerSeq
-            ) match
-              case OrderedConsumer.Decision.Emit =>
-                state
-                  .set(
-                    st.copy(
-                      expectedConsumerSeq = st.expectedConsumerSeq + 1,
-                      lastStreamSeq = meta.streamSeq
-                    )
-                  )
-                  .as(Some(jm))
-              case OrderedConsumer.Decision.Recreate(_) => recreate.as(None)
-              case OrderedConsumer.Decision.DropStale   => F.pure(None)
-        }
+        // One `modify`, not a `get`/`get`/`set` triple: the cycle-name check,
+        // the gap decision and the counter advance are a single atomic
+        // transition costing one effect node instead of four. Not
+        // `Ref.flatModify` -- that is `uncancelable`, which would make
+        // `recreate`'s two API round trips non-interruptible and delay every
+        // stream teardown.
+        state
+          .modify(
+            OrderedConsumer
+              .step(_, meta.consumer, meta.consumerSeq, meta.streamSeq)
+          )
+          .flatMap {
+            case OrderedConsumer.Step.Deliver  => F.pure(Some(jm))
+            case OrderedConsumer.Step.Drop     => F.pure(None)
+            case OrderedConsumer.Step.Recreate => recreate.as(None)
+          }
       }
 
     private def orderedConfig(

@@ -59,6 +59,13 @@ object OrderedConsumerOptions:
 
 /** Mutable tracking state for an ordered consumer's delivery loop.
   *
+  * The consumer name lives here with the sequence counters rather than in a
+  * second `Ref`: the delivery path needs all of them together, so two `Ref`s
+  * cost two effect nodes per message just to read, and a recreate that
+  * publishes the new name and the reset counters as two separate stores leaves
+  * a window in which a reader pairs a name from this cycle with counters from
+  * the last one.
+  *
   * @param expectedConsumerSeq
   *   the next per-consumer delivery sequence expected from the *current*
   *   consumer cycle (resets to 1 on each recreate)
@@ -67,11 +74,16 @@ object OrderedConsumerOptions:
   *   recreate resumes from `lastStreamSeq + 1`
   * @param cycle
   *   increments on each recreate (diagnostic)
+  * @param consumer
+  *   name of the consumer delivering the current cycle (`""` until the first
+  *   create completes); a delivery naming any other consumer belongs to a
+  *   superseded cycle and is dropped
   */
 private[jetstream] final case class OrderedState(
     expectedConsumerSeq: Long,
     lastStreamSeq: Long,
-    cycle: Long
+    cycle: Long,
+    consumer: String
 )
 
 private[jetstream] object OrderedConsumer:
@@ -98,7 +110,42 @@ private[jetstream] object OrderedConsumer:
       Decision.Recreate(lastStreamSeq + 1)
     else Decision.DropStale
 
+  /** The whole per-message state transition, as one pure function, so the
+    * delivery path can run it inside a single `Ref.modify` -- and so it can be
+    * unit-tested, which the `Ref`-and-closure version it replaces could not be.
+    *
+    * A delivery naming a consumer other than the current cycle's was queued
+    * before a recreate and is dropped here; everything else is [[decide]].
+    */
+  def step(
+      st: OrderedState,
+      msgConsumer: String,
+      msgConsumerSeq: Long,
+      msgStreamSeq: Long
+  ): (OrderedState, Step) =
+    if msgConsumer != st.consumer then (st, Step.Drop)
+    else
+      decide(st.expectedConsumerSeq, st.lastStreamSeq, msgConsumerSeq) match
+        case Decision.Emit =>
+          (
+            st.copy(
+              expectedConsumerSeq = st.expectedConsumerSeq + 1,
+              lastStreamSeq = msgStreamSeq
+            ),
+            Step.Deliver
+          )
+        case Decision.Recreate(_) => (st, Step.Recreate)
+        case Decision.DropStale   => (st, Step.Drop)
+
   enum Decision:
     case Emit
     case Recreate(fromStreamSeq: Long)
     case DropStale
+
+  /** Outcome of [[step]]. All three cases are parameterless, hence singletons,
+    * so carrying the decision out of the `Ref.modify` allocates nothing.
+    */
+  enum Step:
+    case Deliver
+    case Drop
+    case Recreate
