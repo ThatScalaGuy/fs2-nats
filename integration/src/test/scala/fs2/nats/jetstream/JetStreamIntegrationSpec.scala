@@ -126,6 +126,51 @@ class JetStreamIntegrationSpec extends CatsEffectSuite:
     }
   }
 
+  test("Nats-Expected-Stream mismatch raises JetStreamApiError") {
+    withJs { js =>
+      val name = uniqueName
+      val cfg = StreamConfig(name = name, subjects = List(s"$name.>"))
+      (for
+        _ <- js.addStream(cfg)
+        result <- js
+          .publish(
+            s"$name.a",
+            Chunk.array("one".getBytes),
+            opts = PublishOptions(expectedStream = Some("NOT_THIS_STREAM"))
+          )
+          .attempt
+      yield result match
+        case Left(_: NatsError.JetStreamApiError) => ()
+        case other => fail(s"Expected JetStreamApiError, got $other")
+      ).guarantee(cleanup(js, name))
+    }
+  }
+
+  test("Nats-Expected-Last-Msg-Id mismatch raises JetStreamApiError") {
+    withJs { js =>
+      val name = uniqueName
+      val cfg = StreamConfig(name = name, subjects = List(s"$name.>"))
+      (for
+        _ <- js.addStream(cfg)
+        _ <- js.publish(
+          s"$name.a",
+          Chunk.array("one".getBytes),
+          opts = PublishOptions(msgId = Some("msg-1"))
+        )
+        result <- js
+          .publish(
+            s"$name.a",
+            Chunk.array("two".getBytes),
+            opts = PublishOptions(expectedLastMsgId = Some("not-msg-1"))
+          )
+          .attempt
+      yield result match
+        case Left(_: NatsError.JetStreamApiError) => ()
+        case other => fail(s"Expected JetStreamApiError, got $other")
+      ).guarantee(cleanup(js, name))
+    }
+  }
+
   test("purge removes all messages") {
     withJs { js =>
       val name = uniqueName

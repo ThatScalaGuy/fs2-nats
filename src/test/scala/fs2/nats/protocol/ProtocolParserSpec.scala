@@ -20,6 +20,7 @@ import cats.effect.IO
 import fs2.{Chunk, Stream}
 import munit.CatsEffectSuite
 import java.nio.charset.StandardCharsets
+import scala.concurrent.duration.*
 
 class ProtocolParserSpec extends CatsEffectSuite:
 
@@ -510,6 +511,43 @@ class ProtocolParserSpec extends CatsEffectSuite:
       }
   }
 
+  /** The `Int` boundary of the declared payload length flips which error the
+    * parser reports, so both sides of it are pinned here rather than in the A/B
+    * property gate: `ReferenceProtocolParser` computes `length + 2` in `Int`,
+    * which overflows to a negative at `Int.MaxValue` and makes it report a
+    * different (CRLF) message than the current parser — a pre-existing
+    * divergence unrelated to the byte-level MSG path.
+    */
+  test("MSG length at the Int boundary picks the right error") {
+    val config = ParserConfig(strictMode = true)
+
+    def err(data: String): IO[String] =
+      Stream
+        .emit(toBytes(data))
+        .unchunks
+        .through(ProtocolParser.parseStream[IO](config))
+        .compile
+        .toList
+        .attempt
+        .map {
+          case Left(e)  => e.getMessage
+          case Right(_) => fail("Expected parse error")
+        }
+
+    for
+      inRange <- err("MSG a 1 2147483647\r\n")
+      overflow <- err("MSG a 1 2147483648\r\n")
+    yield
+      assertEquals(
+        inRange,
+        "Protocol parse error: Unexpected end of stream while reading payload (expected 2147483647 bytes)"
+      )
+      assertEquals(
+        overflow,
+        "Protocol parse error: Invalid MSG frame: MSG a 1 2147483648"
+      )
+  }
+
   test("fail on payload size exceeding limit") {
     val config = ParserConfig(maxPayloadLimit = Some(100), strictMode = true)
     val data = "MSG FOO 1 1000\r\n" + ("x" * 1000) + "\r\n"
@@ -565,4 +603,141 @@ class ProtocolParserSpec extends CatsEffectSuite:
       assertEquals(frames(3), NatsFrame.PongFrame)
       assertEquals(frames(4), NatsFrame.OkFrame)
     }
+  }
+
+  // --- Chunking / batching (#45) ---
+
+  test("frames from one input chunk are emitted as one chunk") {
+    val wire = (1 to 50).map(i => s"MSG a $i 1\r\nX\r\n").mkString
+    Stream
+      .emit(toBytes(wire))
+      .unchunks
+      .through(ProtocolParser.parseStream[IO])
+      .chunks
+      .compile
+      .toList
+      .map(cs => assertEquals(cs.map(_.size), List(50)))
+  }
+
+  test("a lone frame is still emitted as a one-element chunk") {
+    // The request/reply, keepalive and INFO shapes. Must not regress into
+    // allocating a batch array to hold a single frame.
+    Stream
+      .emit(toBytes("PING\r\n"))
+      .unchunks
+      .through(ProtocolParser.parseStream[IO])
+      .chunks
+      .compile
+      .toList
+      .map(cs => assertEquals(cs.map(_.size), List(1)))
+  }
+
+  test("a batch is emitted before the parser waits for more input") {
+    // The parser must never hold a parsed frame across an upstream pull: the
+    // INFO/CONNECT handshake, PING/PONG keepalive and every request/reply
+    // deliver one frame and then wait for the peer, so a frame stuck in the
+    // batch is a deadlock, not a latency blip. The trailing MSG has no payload
+    // yet, so the parser blocks on `Stream.never`; if the two complete frames
+    // were still in the batch this never completes.
+    val input =
+      Stream.emit(toBytes("PING\r\nPONG\r\nMSG a 1 3\r\n")).unchunks ++
+        Stream.never[IO]
+    input
+      .through(ProtocolParser.parseStream[IO])
+      .take(2)
+      .compile
+      .toList
+      .timeout(5.seconds)
+      .map { frames =>
+        assertEquals(frames, List(NatsFrame.PingFrame, NatsFrame.PongFrame))
+      }
+  }
+
+  test("a batch is capped, so one input chunk cannot pin unbounded heap") {
+    val wire = "PING\r\n" * 3000
+    Stream
+      .emit(toBytes(wire))
+      .unchunks
+      .through(ProtocolParser.parseStream[IO])
+      .chunks
+      .compile
+      .toList
+      .map { cs =>
+        assertEquals(cs.map(_.size).sum, 3000)
+        assertEquals(cs.head.size, 1024)
+        assert(cs.forall(_.size <= 1024), s"uncapped batch: ${cs.map(_.size)}")
+      }
+  }
+
+  test("chunks retained across batches are not overwritten by a later batch") {
+    // The emitted `Chunk` aliases the array the batch was accumulated into, so
+    // that array must never be reused between batches. Holding every chunk and
+    // reading them only after the last one has been produced is what catches a
+    // reused accumulator; 2500 frames forces at least three batches.
+    val n = 2500
+    val wire = (1 to n).map(i => s"MSG a $i 0\r\n\r\n").mkString
+    Stream
+      .emit(toBytes(wire))
+      .unchunks
+      .through(ProtocolParser.parseStream[IO])
+      .chunks
+      .compile
+      .toList
+      .map { cs =>
+        assert(cs.size > 1, s"expected several batches, got ${cs.size}")
+        val sids = cs.flatMap(_.toList).collect { case m: NatsFrame.MsgFrame =>
+          m.sid
+        }
+        assertEquals(sids, (1L to n.toLong).toList)
+      }
+  }
+
+  test("payloads of frames batched from one read are not aliased") {
+    // The existing aliasing test in ProtocolParserPropSpec feeds one byte at a
+    // time, so each frame lands in its own batch. This is the shape batching
+    // introduces: two frames alive at once while the carry is scanned further
+    // and compacted underneath them.
+    parseString("MSG a 1 3\r\nAAA\r\nMSG b 2 3\r\nBBB\r\n").map {
+      case List(m1: NatsFrame.MsgFrame, m2: NatsFrame.MsgFrame) =>
+        assertEquals(
+          new String(m1.payload.toArray, StandardCharsets.UTF_8),
+          "AAA"
+        )
+        assertEquals(
+          new String(m2.payload.toArray, StandardCharsets.UTF_8),
+          "BBB"
+        )
+      case other => fail(s"unexpected: $other")
+    }
+  }
+
+  test("frames parsed before a soft error precede the error frame") {
+    val config = ParserConfig.default.copy(strictMode = false)
+    Stream
+      .emit(toBytes("PING\r\nunknown x\r\n"))
+      .unchunks
+      .through(ProtocolParser.parseStream[IO](config))
+      .compile
+      .toList
+      .map {
+        case List(NatsFrame.PingFrame, NatsFrame.ParseErrorFrame(_, _)) => ()
+        case other => fail(s"unexpected: $other")
+      }
+  }
+
+  test("frames parsed before a hard error are emitted before it propagates") {
+    // Strict mode raises, but the already-parsed MSG must still reach the
+    // consumer: on the live path it has already been routed to its subscriber
+    // before the connection is torn down, and core NATS will not redeliver it.
+    Stream
+      .emit(toBytes("MSG a 1 3\r\nAAA\r\nMSG b 2 3\r\nabcXY\r\n"))
+      .unchunks
+      .through(ProtocolParser.parseStream[IO])
+      .handleErrorWith(_ => Stream.empty)
+      .compile
+      .toList
+      .map {
+        case List(m: NatsFrame.MsgFrame) => assertEquals(m.sid, 1L)
+        case other                       => fail(s"unexpected: $other")
+      }
   }

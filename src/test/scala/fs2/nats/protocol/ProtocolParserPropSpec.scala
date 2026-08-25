@@ -73,6 +73,37 @@ class ProtocolParserPropSpec extends ScalaCheckSuite:
       .attempt
       .unsafeRunSync()
 
+  /** Frames emitted *before* a terminal error, for both parsers.
+    *
+    * `equiv`'s `(Left, Left)` arm compares only the exception class and
+    * message, so in strict mode — four of the six configs — everything a parser
+    * produced ahead of the error is invisible to the main gate. Batching
+    * changes exactly that: frames parsed from the same carry as the failing one
+    * must still be emitted before the raise, because on the live path they have
+    * already been routed to their subscribers and core NATS will not redeliver
+    * them.
+    */
+  private def runPartial(
+      parser: Pipe[IO, Byte, NatsFrame],
+      chunks: List[Chunk[Byte]]
+  ): List[NatsFrame] =
+    Stream
+      .emits(chunks)
+      .unchunks
+      .through(parser)
+      .handleErrorWith(_ => Stream.empty)
+      .compile
+      .toList
+      .unsafeRunSync()
+
+  private def equivPartial(
+      config: ParserConfig,
+      chunks: List[Chunk[Byte]]
+  ): Prop =
+    val a = runPartial(ProtocolParser.parseStream[IO](config), chunks)
+    val b = runPartial(ReferenceProtocolParser.parseStream[IO](config), chunks)
+    Prop(a.map(norm) == b.map(norm)) :| s"new=$a\nref=$b"
+
   private def equiv(config: ParserConfig, chunks: List[Chunk[Byte]]): Prop =
     val a = run(ProtocolParser.parseStream[IO](config), chunks)
     val b = run(ReferenceProtocolParser.parseStream[IO](config), chunks)
@@ -232,15 +263,72 @@ class ProtocolParserPropSpec extends ScalaCheckSuite:
   private val genSizes: Gen[List[Int]] =
     Gen.nonEmptyListOf(Gen.choose(1, 17))
 
-  private val genConfig: Gen[ParserConfig] =
-    Gen.oneOf(
-      ParserConfig.default,
-      ParserConfig.default.copy(strictMode = false),
-      ParserConfig.default.copy(strictCRLF = false),
-      ParserConfig.default.copy(strictMode = false, strictCRLF = false),
-      ParserConfig.default.copy(maxPayloadLimit = Some(1000000L)),
-      ParserConfig.default.copy(maxControlLineLength = 64)
-    )
+  private val configs: List[ParserConfig] = List(
+    ParserConfig.default,
+    ParserConfig.default.copy(strictMode = false),
+    ParserConfig.default.copy(strictCRLF = false),
+    ParserConfig.default.copy(strictMode = false, strictCRLF = false),
+    ParserConfig.default.copy(maxPayloadLimit = Some(1000000L)),
+    ParserConfig.default.copy(maxControlLineLength = 64)
+  )
+
+  private val genConfig: Gen[ParserConfig] = Gen.oneOf(configs)
+
+  /** Control lines that probe the edge of the MSG/HMSG fast path. The
+    * generators above only ever emit canonical uppercase frames, so these pin
+    * the shapes a byte-level dispatcher could silently "fix": lower-case
+    * commands, tab and multi-space separators, signed/padded/oversized/
+    * non-ASCII numbers, wrong arities, trailing junk and blank lines. Most must
+    * be declined to the tokenizing path; a few (tab and multi-space separators,
+    * a zero-length payload, an 18-digit sid) must be *accepted* by it. Either
+    * way the answer has to match the reference parser.
+    */
+  private val nonCanonicalLines: List[String] = List(
+    "msg a 1 5\r\nHello\r\n",
+    "Msg a 1 5\r\nHello\r\n",
+    "hmsg a 1 12 12\r\nNATS/1.0\r\n\r\n\r\n",
+    "MSGX a 1 5\r\nHello\r\n",
+    "MSGfoo 1 5\r\n",
+    " MSG a 1 5\r\nHello\r\n",
+    "MSG  a\t1   5 \r\nHello\r\n",
+    "MSG\tfoo   1\t\tx  \r\n",
+    "MSG a 1 5 junk\r\nHello\r\n",
+    "MSG a 1 5 x y z\r\nHello\r\n",
+    "MSG only_subject\r\n",
+    "MSG a 1\r\n",
+    "MSG\r\n",
+    "MSG a +7 5\r\nHello\r\n",
+    "MSG a 007 0005\r\nHello\r\n",
+    "MSG a 000000000000000000001 5\r\nHello\r\n",
+    // Either side of the fast scanner's 18-digit cap, and a sid whose digits
+    // are Arabic-Indic — `Long.parseLong` accepts those via `Character.digit`,
+    // so the fallback has to be the one that decides.
+    "MSG a 999999999999999999 0\r\n\r\n",
+    "MSG a 9999999999999999999 0\r\n\r\n",
+    "MSG a ١ 0\r\n\r\n",
+    "MSG a 9223372036854775808 0\r\n",
+    "MSG a 1 -1\r\n",
+    "MSG a 1 -0\r\n\r\n",
+    "MSG a 1 2147483648\r\n",
+    "MSG a 1 1000000\r\n",
+    "MSG a 1 0\r\n\r\n",
+    "MSG a 1 3\r\nabcXY\r\n",
+    "HMSG a 1 2 3 4 5\r\n",
+    "HMSG a 1 -5 4\r\ndata\r\n",
+    "HMSG a 1 999 4\r\ndata\r\n",
+    "ping\r\n",
+    "PING x\r\n",
+    "PINGX\r\n",
+    "+ OK\r\n",
+    "-ERRfoo\r\n",
+    "-ERR 'x '\r\n",
+    "unknown x\r\n",
+    "\u00df\r\n",
+    "\r\n\r\nPING\r\n",
+    "   \r\n",
+    "PING\r\n  ",
+    "PING\nPONG\r\n"
+  )
 
   // --- properties ----------------------------------------------------------
 
@@ -353,4 +441,31 @@ class ProtocolParserPropSpec extends ScalaCheckSuite:
       run(ProtocolParser.parseStream[IO](ParserConfig.default), Nil),
       Right(List.empty[NatsFrame])
     )
+  }
+
+  property("new ≡ reference for non-canonical control lines") {
+    val cases =
+      for
+        line <- nonCanonicalLines
+        config <- configs
+        // A well-formed frame ahead of the bad line puts the error in the same
+        // carry as an already-parsed frame. Every entry above is standalone, so
+        // without this dimension no case in the suite pins the order of a batch
+        // flush relative to the ParseErrorFrame or the raise (#45).
+        // The three-frame prefix is what exercises the batched flush: with one
+        // frame ahead of the error the parser emits it with `output1`, and the
+        // array path never runs.
+        prefix <- List("", "PING\r\n", "PING\r\nPONG\r\n+OK\r\n")
+        chunk <- List[Array[Byte] => List[Chunk[Byte]]](
+          single,
+          oneByte,
+          fixed(_, 3)
+        )
+      yield
+        val wire = bytes(prefix + line)
+        Prop.all(
+          equiv(config, chunk(wire)) :| s"$prefix$line",
+          equivPartial(config, chunk(wire)) :| s"partial: $prefix$line"
+        )
+    Prop.all(cases*)
   }

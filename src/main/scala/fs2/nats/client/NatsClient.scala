@@ -299,8 +299,8 @@ object NatsClient:
       }
 
     private def frameProcessor: F[Unit] =
-      connManager.frames
-        .evalMap(handleFrame)
+      connManager.frames.chunks
+        .foreach(handleChunk)
         .compile
         .drain
         .attempt
@@ -313,6 +313,36 @@ object NatsClient:
               ClientEvent.ProtocolError(err.getMessage, fatal = false)
             ) *> onDisconnect(err.getMessage)
         }
+
+    /** Run `handleFrame` over one parser batch — every frame the parser decoded
+      * from a single socket read — inside one stream step.
+      *
+      * fs2 charges per element for `evalMap`: a `FlatMapOutput` step, an `Eval`
+      * action, and a second full `Output` step for a `Unit` that
+      * `.compile.drain` throws away. Dispatching per chunk pays that once per
+      * read instead of once per message, and `foreach` rather than `evalMap`
+      * drops the discarded output — the same shape the outbound writer already
+      * uses. `.chunks` is uncons-based: it emits exactly the upstream chunk and
+      * never waits, so it adds no latency.
+      *
+      * The indexed `flatMap` chain keeps the two properties `evalMap` gave us,
+      * and that a `delay { chunk.foreach(...) }` would silently drop: frames
+      * are handled strictly in wire order (per-subscription delivery order,
+      * auto-unsubscribe counting and the PING -> PONG send all depend on it),
+      * and the chain stays interruptible — `close` cancels this fiber while a
+      * `SlowConsumerPolicy.Block` offer may be parked on a full subscriber
+      * queue, and a parked offer is an async boundary. Cancellation is coarser
+      * than it was, though: between two synchronous frames the runtime only
+      * checks at its auto-yield boundary, and the stream itself is now
+      * interruptible per chunk rather than per frame, so `close` can wait out a
+      * whole batch of already-decoded frames.
+      */
+    private def handleChunk(frames: Chunk[Frame]): F[Unit] =
+      val size = frames.size
+      def loop(i: Int): F[Unit] =
+        if i >= size then Async[F].unit
+        else handleFrame(frames(i)) >> loop(i + 1)
+      loop(0)
 
     /** Reconnect (failing over across the server pool) and resume reading
       * frames from the new transport. If reconnection is exhausted, the raised

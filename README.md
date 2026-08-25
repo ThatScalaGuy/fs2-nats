@@ -33,6 +33,7 @@ hidden threads, no surprises. 🎉
 - 💾 **JetStream** — streams, consumers, persistent publish (PubAck), pull & push consume with full ack semantics
 - 🗂️ **Key-Value** — buckets over JetStream with a Direct Get fast read path, optimistic concurrency, history, and watch
 - 📦 **Object Store** — large binary objects chunked over JetStream with streaming put/get, SHA-256 verification, links, and watch
+- 🛰️ **Micro services** — typed request/reply endpoints per ADR-32 with discovery and stats — see [docs/micro.md](docs/micro.md)
 - 🏷️ **Headers** — full NATS 2.2+ headers support (HPUB/HMSG)
 - 🚦 **Backpressure** — configurable slow-consumer policies (block / drop / error)
 - 🔌 **Reconnection** — exponential backoff with full jitter, automatic subscription replay, and cluster failover
