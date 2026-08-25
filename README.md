@@ -25,6 +25,17 @@ built in, and the whole surface — core pub/sub, request/reply, JetStream, Key-
 Object Store — stays inside Cats Effect from the first byte to the last. No callbacks, no
 hidden threads, no surprises. 🎉
 
+## 🤖 AI Usage Disclaimer
+
+This project is developed with the assistance of AI tools. Specifically, AI is used to:
+
+- write documentation, large parts of the code comments, commit messages, and PR/release descriptions
+- build the benchmark harness and a portion of the test suite
+- verify the implementation against the official [NATS ADRs](https://github.com/nats-io/nats-architecture-and-design)
+- perform small refactorings, code adjustments, and style guide enforcement
+
+All AI-generated documents and code are reviewed by the maintainer before they are merged.
+
 ## ✨ Highlights
 
 - 🧊 **Pure functional** — built entirely on Cats Effect 3 and FS2, referentially transparent end to end
