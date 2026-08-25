@@ -101,7 +101,7 @@
     <li class="level1 nav-leaf"><a href="#shared-endpoint-definitions">Shared endpoint definitions</a></li>
     <li class="level1 nav-leaf"><a href="#server-side">Server side</a></li>
     <li class="level1 nav-leaf"><a href="#client-side">Client side</a></li>
-    <li class="level1 nav-leaf"><a href="#request-headers">Request headers</a></li>
+    <li class="level1 nav-leaf"><a href="#headers">Headers</a></li>
     <li class="level1 nav-leaf"><a href="#error-semantics">Error semantics</a></li>
     <li class="level1 nav-node"><a href="#discovery">Discovery</a></li>
     <li class="level2 nav-leaf"><a href="#metadata">Metadata</a></li>
@@ -156,9 +156,9 @@
         your own error ADT with <code>ServiceErr.from</code>.</p>
         
         <h2 id="server-side" class="section"><a class="anchor-link left" href="#server-side"><i class="icofont-laika link">&#xef71;</i></a>Server side</h2>
-        <p>Attach logic with <code>handle</code> (or <code>handleWithHeaders</code> for access to request
-        headers) and start the service as a <code>Resource</code>. Release unsubscribes and
-        cancels in-flight handlers:</p>
+        <p>Attach logic with <code>handle</code> (or <code>handleWithHeaders</code> to read the request headers
+        and set response headers) and start the service as a <code>Resource</code>. Release
+        unsubscribes and cancels in-flight handlers:</p>
         <pre><code class="nohighlight"><span class="keyword">def</span><span> </span><span class="declaration-name">server</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>]): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
   </span><span class="type-name">Ref</span><span>.</span><span class="identifier">of</span><span>[</span><span class="type-name">IO</span><span>, (</span><span class="type-name">Int</span><span>, </span><span class="type-name">Map</span><span>[</span><span class="type-name">String</span><span>, </span><span class="type-name">String</span><span>])]((</span><span class="number-literal">1</span><span>, </span><span class="type-name">Map</span><span>.</span><span class="identifier">empty</span><span>)).</span><span class="identifier">flatMap</span><span> { </span><span class="identifier">store</span><span> =&gt;
     </span><span class="keyword">val</span><span> </span><span class="identifier">handlers</span><span> = </span><span class="type-name">List</span><span>(
@@ -188,25 +188,35 @@
     </span><span class="identifier">_</span><span>     &lt;- </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;add: </span><span class="substitution">$added</span><span class="string-literal">, get: </span><span class="substitution">$found</span><span class="string-literal">&quot;</span><span>)
   </span><span class="keyword">yield</span><span> ()</span></code></pre>
         
-        <h2 id="request-headers" class="section"><a class="anchor-link left" href="#request-headers"><i class="icofont-laika link">&#xef71;</i></a>Request headers</h2>
-        <p>NATS message headers pass through the typed layer untouched: the client
-        attaches them with <code>callWithHeaders</code>, the server reads them with
-        <code>handleWithHeaders</code> (for tracing ids, tenant hints and similar cross-cutting
-        data that does not belong in the payload):</p>
-        <pre class="keep-together pdf epub"><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">protocol</span><span>.</span><span class="type-name">Headers</span><span>
+        <h2 id="headers" class="section"><a class="anchor-link left" href="#headers"><i class="icofont-laika link">&#xef71;</i></a>Headers</h2>
+        <p>NATS message headers pass through the typed layer untouched, in both
+        directions — for tracing ids, tenant hints, cache markers and similar
+        cross-cutting data that does not belong in the payload. The client attaches
+        request headers with <code>callWithHeaders</code>; the handler reads them and answers with
+        a <code>Reply</code>, which is the response value plus the headers to publish with it:</p>
+        <pre><code class="nohighlight"><span class="keyword">import</span><span> </span><span class="identifier">fs2</span><span>.</span><span class="identifier">nats</span><span>.</span><span class="identifier">protocol</span><span>.</span><span class="type-name">Headers</span><span>
+
+</span><span class="keyword">val</span><span> </span><span class="identifier">tracedHandler</span><span> = </span><span class="type-name">OrdersApi</span><span>.</span><span class="identifier">get</span><span>.</span><span class="identifier">handleWithHeaders</span><span>[</span><span class="type-name">IO</span><span>] { (</span><span class="identifier">id</span><span>, </span><span class="identifier">headers</span><span>, </span><span class="identifier">_</span><span>) =&gt;
+  </span><span class="keyword">val</span><span> </span><span class="identifier">trace</span><span> = </span><span class="identifier">headers</span><span>.</span><span class="identifier">get</span><span>(</span><span class="string-literal">&quot;X-Trace-Id&quot;</span><span>).</span><span class="identifier">getOrElse</span><span>(</span><span class="string-literal">&quot;&lt;none&gt;&quot;</span><span>)
+  </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;get </span><span class="substitution">$id</span><span class="string-literal">, trace=</span><span class="substitution">$trace</span><span class="string-literal">&quot;</span><span>)
+    .</span><span class="identifier">as</span><span>(</span><span class="type-name">Right</span><span>(</span><span class="type-name">Reply</span><span>(</span><span class="string-literal">s&quot;order </span><span class="substitution">$id</span><span class="string-literal">&quot;</span><span>, </span><span class="type-name">Headers</span><span>(</span><span class="string-literal">&quot;X-Trace-Id&quot;</span><span> -&gt; </span><span class="identifier">trace</span><span>))))
+}
 
 </span><span class="keyword">def</span><span> </span><span class="declaration-name">tracedCall</span><span>(</span><span class="identifier">client</span><span>: </span><span class="type-name">NatsClient</span><span>[</span><span class="type-name">IO</span><span>], </span><span class="identifier">traceId</span><span>: </span><span class="type-name">String</span><span>): </span><span class="type-name">IO</span><span>[</span><span class="type-name">Unit</span><span>] =
   </span><span class="type-name">Micro</span><span>(</span><span class="identifier">client</span><span>)
     .</span><span class="identifier">callWithHeaders</span><span>(</span><span class="type-name">OrdersApi</span><span>.</span><span class="identifier">get</span><span>)(</span><span class="string-literal">&quot;1&quot;</span><span>, (), </span><span class="type-name">Headers</span><span>(</span><span class="string-literal">&quot;X-Trace-Id&quot;</span><span> -&gt; </span><span class="identifier">traceId</span><span>))
-    .</span><span class="identifier">void</span><span>
-
-</span><span class="keyword">val</span><span> </span><span class="identifier">tracedHandler</span><span> = </span><span class="type-name">OrdersApi</span><span>.</span><span class="identifier">get</span><span>.</span><span class="identifier">handleWithHeaders</span><span>[</span><span class="type-name">IO</span><span>] { (</span><span class="identifier">id</span><span>, </span><span class="identifier">headers</span><span>, </span><span class="identifier">_</span><span>) =&gt;
-  </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;get </span><span class="substitution">$id</span><span class="string-literal">, trace=</span><span class="substitution">${headers.get(&quot;X-Trace-Id&quot;)}</span><span class="string-literal">&quot;</span><span>)
-    .</span><span class="identifier">as</span><span>(</span><span class="type-name">Right</span><span>(</span><span class="string-literal">s&quot;order </span><span class="substitution">$id</span><span class="string-literal">&quot;</span><span>))
-}</span></code></pre>
-        <p>Success replies carry no headers in this version (only error replies use the
-        ADR-32 error headers), so there is nothing to read on the client side of a
-        successful call.</p>
+    .</span><span class="identifier">flatMap</span><span> {
+      </span><span class="keyword">case</span><span> </span><span class="type-name">Right</span><span>(</span><span class="identifier">reply</span><span>) =&gt;
+        </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;</span><span class="substitution">${reply.value}</span><span class="string-literal"> (trace </span><span class="substitution">${reply.headers.get(&quot;X-Trace-Id&quot;)}</span><span class="string-literal">)&quot;</span><span>)
+      </span><span class="keyword">case</span><span> </span><span class="type-name">Left</span><span>(</span><span class="identifier">err</span><span>) =&gt; </span><span class="type-name">IO</span><span>.</span><span class="identifier">println</span><span>(</span><span class="string-literal">s&quot;get failed: </span><span class="substitution">$err</span><span class="string-literal">&quot;</span><span>)
+    }</span></code></pre>
+        <p><code>Reply(o)</code> is the no-headers case — it is what <code>handle</code> produces and what
+        <code>call</code> unwraps, so the plain <code>handle</code>/<code>call</code> pair keeps working on <code>O</code> and
+        never mentions <code>Reply</code>. Use <code>handleWithHeaders</code> whenever you want to set
+        response headers, even if you ignore the request headers.</p>
+        <p>Only successful replies carry custom headers: an error reply is the empty
+        ADR-32 body plus <code>Nats-Service-Error-Code</code> / <code>Nats-Service-Error</code>, so a
+        handler&#39;s <code>Left(e)</code> has nowhere to put them.</p>
         
         <h2 id="error-semantics" class="section"><a class="anchor-link left" href="#error-semantics"><i class="icofont-laika link">&#xef71;</i></a>Error semantics</h2>
         <ul>
@@ -289,8 +299,9 @@
           <li>Endpoints join queue group <code>&quot;q&quot;</code> by default (per ADR-32), so multiple
           instances load-balance automatically. Override per service with
           <code>ServiceConfig.withQueueGroup</code> or per endpoint with <code>Rpc.withQueueGroup</code>.</li>
-          <li>Success replies are published without headers; setting response headers on a
-          successful reply is not supported yet.</li>
+          <li>Control characters in response header keys and values are replaced with
+          spaces before the reply is published: a CR/LF there would start a new line in
+          the header block and let a request forge headers in its own reply.</li>
         </ul>
 
         
