@@ -68,7 +68,7 @@ private[benchmarks] enum LoopStep:
   * }
   * }}}
   * so that the liveness tick and the data share one sequential pull and need no
-  * further synchronization. In fs2 3.13.0 `mergeHaltL` expands to
+  * further synchronization. In fs2 3.14.0 `mergeHaltL` expands to
   * `noneTerminate.merge(that.map(Some(_))).unNoneTerminate`, so the bill is
   * **two** `Option` allocations plus an unwrap per element, and per *chunk*
   * three fresh `Chunk`s, an `indexWhere` scan, a `Channel.synchronous`
