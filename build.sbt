@@ -1,5 +1,5 @@
 lazy val V = new {
-  val scala3 = "3.3.8"
+  val scala3 = "3.9.0"
   val catsEffect = "3.7.1"
   val fs2 = "3.14.0"
   val jsoniter = "2.40.1"
