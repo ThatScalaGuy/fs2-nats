@@ -5,7 +5,7 @@ lazy val V = new {
   val jsoniter = "2.40.1"
   val bouncyCastle = "1.86"
   val munit = "1.3.6"
-  val munitCatsEffect = "2.2.0"
+  val munitCatsEffect = "2.2.1"
   val scalaCheck = "1.20.0"
   val munitScalaCheck = "1.3.1"
 }
