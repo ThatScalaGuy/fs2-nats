@@ -64,6 +64,20 @@ trait NatsClient[F[_]]:
       replyTo: Option[String] = None
   ): F[Unit]
 
+  /** Wait until the server has processed every message sent before this call.
+    *
+    * `publish` only enqueues; `flush` sends a PING and completes on the
+    * matching PONG. Fails with [[fs2.nats.errors.NatsError.Timeout]] if no PONG
+    * arrives within `timeout`, with
+    * [[fs2.nats.errors.NatsError.ConnectionFailed]] if the client is not
+    * connected or the connection drops while waiting, and with
+    * [[fs2.nats.errors.NatsError.ClientClosed]] after `close`.
+    *
+    * @param timeout
+    *   How long to wait for the PONG (default 5 seconds)
+    */
+  def flush(timeout: FiniteDuration = 5.seconds): F[Unit]
+
   /** Subscribe to a subject.
     *
     * @param subject
@@ -369,7 +383,7 @@ object NatsClient:
           connManager.send(SerializationUtils.buildPong)
 
         case NatsFrame.PongFrame =>
-          Async[F].unit
+          connManager.handlePong
 
         case NatsFrame.OkFrame =>
           Async[F].unit
@@ -408,6 +422,9 @@ object NatsClient:
       checkClosed *>
         (if headers.isEmpty then publisher.publish(subject, payload, replyTo)
          else publisher.publishWithHeaders(subject, payload, headers, replyTo))
+
+    override def flush(timeout: FiniteDuration): F[Unit] =
+      checkClosed *> connManager.flush(timeout)
 
     override def request(
         subject: String,

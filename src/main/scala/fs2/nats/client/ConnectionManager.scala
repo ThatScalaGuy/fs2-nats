@@ -16,7 +16,7 @@
 
 package fs2.nats.client
 
-import cats.effect.{Async, Deferred, Ref, Resource, Temporal}
+import cats.effect.{Async, Deferred, Outcome, Ref, Resource, Temporal}
 import cats.effect.std.{Queue, Supervisor}
 import cats.effect.syntax.all.*
 import cats.syntax.all.*
@@ -39,12 +39,14 @@ import fs2.nats.publish.SerializationUtils
 import fs2.nats.transport.{
   NatsSocket,
   Outgoing,
+  PongSlots,
   TlsTransport,
   Transport,
   TransportConfig
 }
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
 
 /** State of the NATS connection.
   *
@@ -66,13 +68,20 @@ final case class ConnectionState(
   * go online" are atomic with respect to each other.
   *
   *   - [[ConnPhase.Online]]: connected; writes go straight to the transport.
+  *     `pongs` holds the flush waiters of this connection in wire order.
+  *     `flushable` turns true once the reconnect buffer has been replayed, so a
+  *     flush PING cannot overtake buffered writes.
   *   - [[ConnPhase.Offline]]: disconnected/reconnecting; writes accumulate in a
   *     bounded buffer to be replayed on reconnect.
   *   - [[ConnPhase.Closed]]: the client is closed; writes fail.
   */
 private[client] sealed trait ConnPhase[F[_]]
 private[client] object ConnPhase:
-  final case class Online[F[_]](transport: Transport[F]) extends ConnPhase[F]
+  final case class Online[F[_]](
+      transport: Transport[F],
+      pongs: PongSlots,
+      flushable: Boolean
+  ) extends ConnPhase[F]
   final case class Offline[F[_]](pending: Vector[Chunk[Byte]], bytes: Long)
       extends ConnPhase[F]
   final case class Closed[F[_]]() extends ConnPhase[F]
@@ -109,6 +118,18 @@ trait ConnectionManager[F[_]]:
     * and held in the reconnect buffer like any other pending write.
     */
   def sendOutgoing(out: Outgoing): F[Unit]
+
+  /** Send PING and wait for the matching PONG, so every write sent before this
+    * call has been processed by the server. Fails with
+    * [[fs2.nats.errors.NatsError.Timeout]] after `timeout`, with
+    * [[fs2.nats.errors.NatsError.ConnectionFailed]] when not connected or when
+    * the connection drops first, and with
+    * [[fs2.nats.errors.NatsError.ClientClosed]] after close.
+    */
+  def flush(timeout: FiniteDuration): F[Unit]
+
+  /** Complete the oldest pending flush. Called for every PONG frame. */
+  private[client] def handlePong: F[Unit]
 
   /** Stream of incoming protocol elements from the server (control `NatsFrame`s
     * and already-built `NatsMessage` data frames; see [[Frame]]).
@@ -265,7 +286,8 @@ object ConnectionManager:
         swapOnline(transport).flatMap { pending =>
           recordConnection(info, server) *>
             eventQueue.offer(ClientEvent.Connected(info)) *>
-            poll(pending.traverse_(transport.send))
+            poll(pending.traverse_(transport.send)) *>
+            markFlushable(transport)
         }
       }
 
@@ -273,11 +295,26 @@ object ConnectionManager:
       * disconnected (empty on the initial connect).
       */
     private def swapOnline(transport: Transport[F]): F[Vector[Chunk[Byte]]] =
-      connRef.modify {
-        case ConnPhase.Offline(pending, _) =>
-          (ConnPhase.Online(transport), pending)
-        case _ =>
-          (ConnPhase.Online(transport), Vector.empty[Chunk[Byte]])
+      Async[F]
+        .delay {
+          // sendConnect already queued CONNECT + PING ahead of any flush PING,
+          // so its PONG is the first one: give it a slot nobody waits on.
+          val pongs = new PongSlots
+          pongs.add(new CompletableFuture[Unit])
+          ConnPhase.Online(transport, pongs, flushable = false)
+        }
+        .flatMap { online =>
+          connRef.modify {
+            case ConnPhase.Offline(pending, _) => (online, pending)
+            case _ => (online, Vector.empty[Chunk[Byte]])
+          }
+        }
+
+    private def markFlushable(transport: Transport[F]): F[Unit] =
+      connRef.update {
+        case ConnPhase.Online(t, pongs, _) if t eq transport =>
+          ConnPhase.Online(t, pongs, flushable = true)
+        case other => other
       }
 
     /** Record connection state and fold the server's `connect_urls` into the
@@ -300,8 +337,8 @@ object ConnectionManager:
 
     override def transport: F[Transport[F]] =
       connRef.get.flatMap {
-        case ConnPhase.Online(t)     => Async[F].pure(t)
-        case ConnPhase.Offline(_, _) =>
+        case ConnPhase.Online(t, _, _) => Async[F].pure(t)
+        case ConnPhase.Offline(_, _)   =>
           Async[F].raiseError(NatsError.ConnectionFailed("not connected"))
         case ConnPhase.Closed() => Async[F].raiseError(NatsError.ClientClosed)
       }
@@ -325,8 +362,8 @@ object ConnectionManager:
       // the authoritative `modify` path, which also re-checks Online in case a
       // reconnect raced us.
       connRef.get.flatMap {
-        case ConnPhase.Online(t) => t.sendOutgoing(out)
-        case _                   => sendBuffered(out)
+        case ConnPhase.Online(t, _, _) => t.sendOutgoing(out)
+        case _                         => sendBuffered(out)
       }
 
     /** Slow path for the non-Online phases: atomically buffer (Offline,
@@ -339,7 +376,7 @@ object ConnectionManager:
     private def sendBuffered(out: Outgoing): F[Unit] =
       connRef
         .modify[Either[NatsError, Option[Transport[F]]]] {
-          case online @ ConnPhase.Online(t) =>
+          case online @ ConnPhase.Online(t, _, _) =>
             (online, Right(Some(t)))
           case ConnPhase.Closed() =>
             (ConnPhase.Closed(), Left(NatsError.ClientClosed))
@@ -362,6 +399,56 @@ object ConnectionManager:
           case Left(err)      => Async[F].raiseError(err)
         }
 
+    override def flush(timeout: FiniteDuration): F[Unit] =
+      connRef.get.flatMap {
+        case ConnPhase.Online(t, pongs, true) =>
+          Async[F]
+            .delay {
+              val waiter = new CompletableFuture[Unit]
+              pongs.track(waiter)
+              waiter
+            }
+            .flatMap { waiter =>
+              (t.sendOutgoing(Outgoing.Ping(pongs, waiter))
+                .guaranteeCase {
+                  case Outcome.Succeeded(_) => Async[F].unit
+                  case _ => Async[F].delay(pongs.untrack(waiter))
+                }
+                .handleErrorWith(_ => sendFailed) *>
+                Async[F].fromCompletableFuture(Async[F].pure(waiter)))
+                .timeoutTo(
+                  timeout,
+                  Async[F].raiseError(
+                    NatsError.Timeout("flush", timeout.toMillis)
+                  )
+                )
+            }
+        case ConnPhase.Closed() => Async[F].raiseError(NatsError.ClientClosed)
+        case _                  =>
+          Async[F].raiseError(NatsError.ConnectionFailed("not connected"))
+      }
+
+    // A dead transport raises ClientClosed from send; report it as a lost
+    // connection unless the client really is closed.
+    private def sendFailed: F[Unit] =
+      connRef.get.flatMap {
+        case ConnPhase.Closed() => Async[F].raiseError(NatsError.ClientClosed)
+        case _                  =>
+          Async[F].raiseError(NatsError.ConnectionFailed("connection lost"))
+      }
+
+    override private[client] def handlePong: F[Unit] =
+      connRef.get.flatMap {
+        case ConnPhase.Online(_, pongs, _) =>
+          Async[F].delay(pongs.completeOldest())
+        case _ => Async[F].unit
+      }
+
+    private def failPongs(phase: ConnPhase[F], err: Throwable): F[Unit] =
+      phase match
+        case ConnPhase.Online(_, pongs, _) => Async[F].delay(pongs.failAll(err))
+        case _                             => Async[F].unit
+
     override def frames: Stream[F, Frame] =
       Stream.eval(transport).flatMap(_.frames)
 
@@ -374,10 +461,15 @@ object ConnectionManager:
         else
           // Enter the buffering phase so writes issued during the outage are
           // queued (up to reconnectBufferSize) instead of hitting a dead socket.
-          connRef.update {
-            case ConnPhase.Online(_) => ConnPhase.Offline(Vector.empty, 0L)
-            case other               => other
-          } *>
+          connRef
+            .modify {
+              case online: ConnPhase.Online[F] =>
+                (ConnPhase.Offline(Vector.empty, 0L), online)
+              case other => (other, other)
+            }
+            .flatMap(
+              failPongs(_, NatsError.ConnectionFailed("connection lost"))
+            ) *>
             eventQueue.offer(
               ClientEvent.Disconnected(reason, willReconnect = true)
             ) *>
@@ -386,9 +478,10 @@ object ConnectionManager:
 
     override def close: F[Unit] =
       closedRef.set(true) *>
-        connRef.getAndSet(ConnPhase.Closed()).flatMap {
-          case ConnPhase.Online(t) => t.close
-          case _                   => Async[F].unit
+        connRef.getAndSet(ConnPhase.Closed()).flatMap { phase =>
+          failPongs(phase, NatsError.ClientClosed) *> (phase match
+            case ConnPhase.Online(t, _, _) => t.close
+            case _                         => Async[F].unit)
         } *>
         stateRef.set(None)
 
@@ -463,7 +556,8 @@ object ConnectionManager:
           recordConnection(info, server) *>
             resubscribeRef.get.flatMap(_.traverse_(resub => resub(info))) *>
             eventQueue.offer(ClientEvent.Reconnected(info, attempt)) *>
-            poll(pending.traverse_(transport.send))
+            poll(pending.traverse_(transport.send)) *>
+            markFlushable(transport)
         }
       }
 
