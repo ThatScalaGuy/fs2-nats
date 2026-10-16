@@ -32,16 +32,16 @@ private[nats] final class PongSlots:
 
   def track(waiter: CompletableFuture[Unit]): Unit =
     val err = synchronized {
-      if failed eq null then queued.add(waiter)
+      if failed eq null then queued.add(waiter): Unit
       failed
     }
-    if err ne null then waiter.completeExceptionally(err)
+    if err ne null then waiter.completeExceptionally(err): Unit
 
   /** Undo [[track]] when the PING could not be enqueued. Harmless if it was:
     * [[add]] still moves the waiter into `slots`.
     */
   def untrack(waiter: CompletableFuture[Unit]): Unit =
-    synchronized(queued.remove(waiter))
+    synchronized(queued.remove(waiter): Unit)
 
   /** Called by the writer when it serializes the waiter's PING. */
   def add(waiter: CompletableFuture[Unit]): Unit =
@@ -53,7 +53,7 @@ private[nats] final class PongSlots:
   /** Complete the oldest waiter; a PONG with no waiter is ignored. */
   def completeOldest(): Unit =
     val waiter = synchronized(slots.pollFirst())
-    if waiter ne null then waiter.complete(())
+    if waiter ne null then waiter.complete(()): Unit
 
   def failAll(err: Throwable): Unit =
     val drained = synchronized {
