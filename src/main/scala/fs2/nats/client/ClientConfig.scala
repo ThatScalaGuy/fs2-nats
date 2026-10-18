@@ -213,6 +213,11 @@ object ServerAddress:
   *   Maximum number of outbound bytes buffered while disconnected; on reconnect
   *   the buffer is replayed so publishes are not lost. A value of 0 disables
   *   buffering (writes during a disconnect fail immediately).
+  * @param flushOnClose
+  *   When set, `close` (and so releasing the client Resource) first flushes
+  *   with this timeout. Only works while connected: publishes in the reconnect
+  *   buffer are dropped. Flush errors are ignored. None closes without
+  *   flushing.
   */
 final case class ClientConfig(
     host: Host,
@@ -230,7 +235,8 @@ final case class ClientConfig(
     echo: Boolean = true,
     servers: List[ServerAddress] = Nil,
     noRandomize: Boolean = false,
-    reconnectBufferSize: Long = 8L * 1024 * 1024
+    reconnectBufferSize: Long = 8L * 1024 * 1024,
+    flushOnClose: Option[FiniteDuration] = Some(5.seconds)
 ):
   /** The full seed pool: the primary `host`/`port` first, then any extra
     * `servers`, de-duplicated with order preserved.

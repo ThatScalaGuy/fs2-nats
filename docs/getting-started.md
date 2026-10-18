@@ -104,6 +104,12 @@ def publishAndFlush(client: NatsClient[IO]): IO[Unit] =
 reconnecting, and a flush that is waiting fails the same way if the connection
 drops.
 
+Closing the client (or releasing its `Resource`) flushes first, so publishes
+made right before shutdown reach the server. The flush waits up to
+`ClientConfig.flushOnClose` (5 seconds by default) and its errors are ignored.
+It only helps while connected: if the client is reconnecting, publishes in the
+reconnect buffer are dropped. Set it to `None` to close without flushing.
+
 ## Wildcard subscriptions
 
 `*` matches a single token; `>` matches one or more trailing tokens:

@@ -89,12 +89,17 @@ class FlushSpec extends CatsEffectSuite:
         .background
     yield FakeServer(port, permits, pings, kill)
 
-  private def client(port: Port): Resource[IO, NatsClient[IO]] =
+  // Short close flush: most tests never answer it.
+  private def client(
+      port: Port,
+      flushOnClose: Option[FiniteDuration] = Some(200.millis)
+  ): Resource[IO, NatsClient[IO]] =
     NatsClient.connect[IO](
       ClientConfig(
         host = host"127.0.0.1",
         port = port,
-        backoff = BackoffConfig.fast.copy(maxRetries = Some(1))
+        backoff = BackoffConfig.fast.copy(maxRetries = Some(1)),
+        flushOnClose = flushOnClose
       )
     )
 
@@ -190,6 +195,52 @@ class FlushSpec extends CatsEffectSuite:
     fakeServer.use { srv =>
       client(srv.port).use { c =>
         c.close *> c.flush().intercept[NatsError.ClientClosed.type].void
+      }
+    }
+  }
+
+  test("releasing the client waits for the close flush PONG") {
+    fakeServer.use { srv =>
+      for
+        release <- Deferred[IO, Unit]
+        fiber <- client(srv.port, Some(10.seconds)).use(_ => release.get).start
+        _ <- srv.pings.take // CONNECT
+        _ <- release.complete(())
+        _ <- srv.pings.take // close flush
+        early <- fiber.join.timeout(300.millis).attempt
+        _ = assert(early.isLeft, "close did not wait for the flush")
+        _ <- srv.permits.offer(()).replicateA_(2)
+        _ <- fiber.joinWithNever
+      yield ()
+    }
+  }
+
+  test("close still completes when the close flush times out") {
+    fakeServer.use { srv =>
+      client(srv.port).use(_ => IO.unit).timeout(5.seconds)
+    }
+  }
+
+  test("flushOnClose = None closes without a PING") {
+    fakeServer.use { srv =>
+      for
+        _ <- client(srv.port, None).use(_ => srv.pings.take) // CONNECT
+        _ <- IO.sleep(200.millis)
+        extra <- srv.pings.tryTake
+      yield assertEquals(extra, None)
+    }
+  }
+
+  test("a canceled close still closes subscriptions") {
+    fakeServer.use { srv =>
+      client(srv.port, Some(10.seconds)).use { c =>
+        c.subscribe("foo").use { msgs =>
+          for
+            ended <- msgs.compile.drain.start
+            _ <- c.close.timeout(200.millis).attempt
+            _ <- ended.joinWithNever.timeout(2.seconds)
+          yield ()
+        }
       }
     }
   }

@@ -18,6 +18,7 @@ package fs2.nats.client
 
 import cats.effect.{Async, Ref, Resource}
 import cats.effect.std.{Queue, Supervisor}
+import cats.effect.syntax.all.*
 import cats.syntax.all.*
 import fs2.{Chunk, Stream}
 import fs2.io.net.Network
@@ -158,7 +159,8 @@ trait NatsClient[F[_]]:
   def events: Stream[F, ClientEvent]
 
   /** Close the client and release all resources. All subscriptions will be
-    * closed and no further operations allowed.
+    * closed and no further operations allowed. If [[ClientConfig.flushOnClose]]
+    * is set, pending publishes are flushed first.
     *
     * @return
     *   Effect that completes when the client is fully closed
@@ -260,7 +262,8 @@ object NatsClient:
         requestor,
         eventQueue,
         closedRef,
-        supervisor
+        supervisor,
+        config.flushOnClose
       )
 
       _ <- Resource.make(client.initialize)(_ => client.close)
@@ -292,7 +295,8 @@ object NatsClient:
       requestor: Requestor[F],
       eventQueue: Queue[F, ClientEvent],
       closedRef: Ref[F, Boolean],
-      supervisor: Supervisor[F]
+      supervisor: Supervisor[F],
+      flushOnClose: Option[FiniteDuration]
   ) extends NatsClient[F]:
 
     def initialize: F[Unit] =
@@ -486,13 +490,18 @@ object NatsClient:
     override def events: Stream[F, ClientEvent] =
       Stream.fromQueueUnterminated(eventQueue).merge(connManager.events)
 
+    // Marks closed before flushing so new publishes are rejected during the
+    // flush. Only the flush is cancelable: a later close sees closedRef set
+    // and would skip the teardown.
     override def close: F[Unit] =
-      closedRef.get.flatMap { alreadyClosed =>
-        if alreadyClosed then Async[F].unit
-        else
-          closedRef.set(true) *>
-            subManager.closeAll *>
-            connManager.close
+      Async[F].uncancelable { poll =>
+        closedRef.getAndSet(true).flatMap { alreadyClosed =>
+          if alreadyClosed then Async[F].unit
+          else
+            flushOnClose
+              .traverse_(t => poll(connManager.flush(t)).attempt)
+              .guarantee(subManager.closeAll *> connManager.close)
+        }
       }
 
     override def serverInfo: F[Info] =
