@@ -18,6 +18,8 @@ package fs2.nats.transport
 
 import fs2.Chunk
 
+import java.util.concurrent.CompletableFuture
+
 /** A queued outbound write, drained and assembled by the single writer fiber.
   *
   * `Pub`/`HPub` carry a small prebuilt protocol header (the control line up to
@@ -99,6 +101,19 @@ private[nats] object Outgoing:
       dest(o) = Cr
       dest(o + 1) = Lf
       o + 2
+
+  private val PingBytes: Array[Byte] = "PING\r\n".getBytes("US-ASCII")
+
+  /** A flush `PING`. `copyInto` adds `waiter` to `slots` as the writer
+    * serializes it, so the slot order is the wire order by construction.
+    */
+  final case class Ping(slots: PongSlots, waiter: CompletableFuture[Unit])
+      extends Outgoing:
+    def size: Int = PingBytes.length
+    def copyInto(dest: Array[Byte], off: Int): Int =
+      slots.add(waiter)
+      System.arraycopy(PingBytes, 0, dest, off, PingBytes.length)
+      off + PingBytes.length
 
   /** Sentinel enqueued to terminate the writer drain loop. Compared by
     * reference identity (`ne`), so real writes need not be wrapped in an

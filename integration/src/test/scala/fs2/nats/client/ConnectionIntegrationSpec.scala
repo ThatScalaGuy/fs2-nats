@@ -259,6 +259,26 @@ class ConnectionIntegrationSpec extends CatsEffectSuite:
       .timeout(10.seconds)
   }
 
+  test("flush makes SUB and PUBs visible across clients without sleeping") {
+    val subject = s"test.flush.${System.currentTimeMillis()}"
+    val n = 100
+    (NatsClient.connect[IO](clientConfig), NatsClient.connect[IO](clientConfig))
+      .tupled
+      .use { case (sub, pub) =>
+        sub.subscribe(subject).use { msgStream =>
+          for
+            _ <- sub.flush()
+            _ <- (1 to n).toList.traverse_(i =>
+              pub.publish(subject, Chunk.array(s"m$i".getBytes))
+            )
+            _ <- pub.flush()
+            msgs <- msgStream.take(n.toLong).timeout(5.seconds).compile.toList
+          yield assertEquals(msgs.map(_.payloadAsString), (1 to n).map(i => s"m$i").toList)
+        }
+      }
+      .timeout(10.seconds)
+  }
+
   test("multiple concurrent subscriptions") {
     NatsClient
       .connect[IO](clientConfig)

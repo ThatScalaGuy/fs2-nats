@@ -87,6 +87,23 @@ def requestId(msg: NatsMessage): Option[String] =
   msg.headers.get("x-request-id")
 ```
 
+## Flushing
+
+`publish` only puts the message into the write queue. To know that the server
+has processed everything sent so far, call `flush`. It sends a PING and
+completes on the matching PONG, or fails with `NatsError.Timeout` (5 seconds
+unless you pass a `timeout`):
+
+```scala mdoc:silent
+def publishAndFlush(client: NatsClient[IO]): IO[Unit] =
+  client.publish("events.created", Chunk.array("""{"id": 2}""".getBytes)) *>
+    client.flush()
+```
+
+`flush` fails fast with `NatsError.ConnectionFailed` while the client is
+reconnecting, and a flush that is waiting fails the same way if the connection
+drops.
+
 ## Wildcard subscriptions
 
 `*` matches a single token; `>` matches one or more trailing tokens:

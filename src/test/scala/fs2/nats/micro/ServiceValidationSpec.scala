@@ -45,6 +45,7 @@ class ServiceValidationSpec extends munit.CatsEffectSuite:
         headers: Headers,
         replyTo: Option[String]
     ): IO[Unit] = die("publish")
+    def flush(timeout: FiniteDuration): IO[Unit] = die("flush")
     def subscribe(
         subject: String,
         queueGroup: Option[String]

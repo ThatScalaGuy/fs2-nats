@@ -50,6 +50,7 @@ class ServiceReplySpec extends munit.CatsEffectSuite:
         headers: Headers,
         replyTo: Option[String]
     ): IO[Unit] = sink.update(_ :+ Published(subject, payload, headers))
+    def flush(timeout: FiniteDuration): IO[Unit] = die("flush")
     def subscribe(
         subject: String,
         queueGroup: Option[String]
